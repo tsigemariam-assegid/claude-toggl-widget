@@ -1,0 +1,34 @@
+{
+  "name": "claude-widget",
+  "version": "0.1.0",
+  "description": "Menu bar widget for Claude Code usage",
+  "main": "out/main/main.js",
+  "scripts": {
+    "dev": "mkdir -p out/assets && cp -r assets/* out/assets/ && electron-vite dev",
+    "build": "electron-vite build && mkdir -p out/assets && cp -r assets/* out/assets/",
+    "preview": "electron-vite preview",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "electron": "^30.0.0",
+    "electron-builder": "^24.0.0",
+    "electron-vite": "^2.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0"
+  },
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "build": {
+    "appId": "com.local.claude-widget",
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools"
+    }
+  }
+}
