@@ -141,12 +141,7 @@ function sumRecords(records: UsageRecord[]) {
   };
 }
 
-export interface WindowAnchors {
-  fiveHourResetsAt?: string;  // from Anthropic API — used to derive precise window start
-  sevenDayResetsAt?: string;
-}
-
-export async function getClaudeStats(anchors?: WindowAnchors): Promise<ClaudeStats> {
+export async function getClaudeStats(): Promise<ClaudeStats> {
   if (!fs.existsSync(CLAUDE_DIR)) {
     throw new Error(`Claude projects dir not found: ${CLAUDE_DIR}`);
   }
@@ -163,15 +158,8 @@ export async function getClaudeStats(anchors?: WindowAnchors): Promise<ClaudeSta
 
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
-
-  // Use API-anchored window starts when available — matches Anthropic's server-side boundaries
-  const fiveHoursAgo = anchors?.fiveHourResetsAt
-    ? new Date(new Date(anchors.fiveHourResetsAt).getTime() - 5 * 60 * 60 * 1000).toISOString()
-    : new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString();
-
-  const weekAgo = anchors?.sevenDayResetsAt
-    ? new Date(new Date(anchors.sevenDayResetsAt).getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
-    : new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const fiveHoursAgo = new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString();
+  const weekAgo      = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
   const todayRecords = allRecords.filter(r => r.timestamp.startsWith(todayStr));
   const weekRecords  = allRecords.filter(r => r.timestamp >= weekAgo);
@@ -233,16 +221,14 @@ export async function getClaudeStats(anchors?: WindowAnchors): Promise<ClaudeSta
     oldestTimestamp: session5hRecs[0]?.timestamp ?? null,
   };
 
-  // Prefer API resetsAt (authoritative); fall back to deriving from oldest local record
-  const session5hResetsAt = anchors?.fiveHourResetsAt
-    ?? (session5hRecs.length > 0
-      ? new Date(new Date(session5hRecs[0].timestamp).getTime() + 5 * 60 * 60 * 1000).toISOString()
-      : null);
+  // Derived reset time: when the oldest record in each window ages out
+  const session5hResetsAt = session5hRecs.length > 0
+    ? new Date(new Date(session5hRecs[0].timestamp).getTime() + 5 * 60 * 60 * 1000).toISOString()
+    : null;
 
-  const weekResetsAt = anchors?.sevenDayResetsAt
-    ?? (weekRecords.length > 0
-      ? new Date(new Date(weekRecords[0].timestamp).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
-      : null);
+  const weekResetsAt = weekRecords.length > 0
+    ? new Date(new Date(weekRecords[0].timestamp).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
+    : null;
 
   // Active sessions: distinct sessionIds with any record in last 5h
   const active5hGroups = groupBy(session5hRecs, r => r.sessionId);

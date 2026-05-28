@@ -12,7 +12,7 @@ import fs from 'fs';
 import os from 'os';
 import { execFileSync } from 'child_process';
 import https from 'https';
-import { getClaudeStats, type WindowAnchors } from './parser';
+import { getClaudeStats } from './parser';
 import { getTogglStats } from './toggl';
 
 let tray: Tray | null = null;
@@ -88,17 +88,9 @@ function calcStreak(activityByDay: Record<string, number>): number {
   return streak;
 }
 
-function limitsToAnchors(limits: UsageLimits | null): WindowAnchors | undefined {
-  if (!limits) return undefined;
-  const anchors: WindowAnchors = {};
-  if (limits.fiveHour?.resetsAt) anchors.fiveHourResetsAt = limits.fiveHour.resetsAt;
-  if (limits.sevenDay?.resetsAt) anchors.sevenDayResetsAt = limits.sevenDay.resetsAt;
-  return Object.keys(anchors).length > 0 ? anchors : undefined;
-}
-
 async function refreshClaudeStats() {
   try {
-    const stats = await getClaudeStats(limitsToAnchors(cachedUsageLimits));
+    const stats = await getClaudeStats();
     const streak = calcStreak(stats.activityByDay);
     tray?.setTitle(streak > 0 ? ` ${streak}` : '');
     const tokens = stats.today.tokens;
@@ -201,7 +193,7 @@ app.whenReady().then(async () => {
   });
 
   // Claude IPC
-  ipcMain.handle('get-stats', () => getClaudeStats(limitsToAnchors(cachedUsageLimits)));
+  ipcMain.handle('get-stats', () => getClaudeStats());
   ipcMain.handle('get-usage-limits', async () => {
     cachedUsageLimits = await fetchUsageLimits();
     return cachedUsageLimits;
