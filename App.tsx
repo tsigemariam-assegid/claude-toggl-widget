@@ -173,16 +173,16 @@ function HourBar({ counts }: { counts: number[] }) {
   const LABELS: Record<number, string> = { 0: '12a', 6: '6a', 12: '12p', 18: '6p' };
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1.5, height: 28 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1.5, height: 40 }}>
         {counts.map((c, i) => (
           <div
             key={i}
             title={`${i}:00 — ${c}`}
             style={{
               flex: 1,
-              height: `${Math.max(2, (c / max) * 26)}px`,
+              height: `${Math.max(3, (c / max) * 38)}px`,
               background: c > 0
-                ? `rgba(96,165,250,${0.25 + (c / max) * 0.75})`
+                ? `rgba(193,95,60,${0.15 + Math.pow(c / max, 1.8) * 0.85})`
                 : 'rgba(255,255,255,0.06)',
               borderRadius: 2,
             }}
@@ -231,10 +231,10 @@ function TogglTokenInput({ onSave }: { onSave: (t: string) => void }) {
         style={{
           width: '100%',
           padding: '6px 0',
-          background: 'rgba(96,165,250,0.2)',
-          border: '1px solid rgba(96,165,250,0.3)',
+          background: 'rgba(193,95,60,0.2)',
+          border: '1px solid rgba(193,95,60,0.3)',
           borderRadius: 7,
-          color: '#93c5fd',
+          color: '#C15F3C',
           fontSize: 11,
           fontFamily: 'monospace',
           cursor: 'pointer',
@@ -302,11 +302,15 @@ function ConcentricRings({ stats, limits, usageLimits, onEditLimits }: {
   const sessionCount = stats.activeSessions.length;
   const sessionLabel = sessionCount > 1 ? `Session (5hr) ×${sessionCount}` : 'Session (5hr)';
 
+  const SESSION_COLOR = '#C15F3C';
+  const SONNET_COLOR  = '#D4956A';
+  const WEEK_COLOR    = '#B1ADA1';
+
   // List order: inner → middle → outer
   const rows = [
-    { label: sessionLabel,     pct: sessionPct, tokens: stats.session5h.tokens,   sub: sessionResets, color: '#a78bfa', centerLabel: isIdle ? 'idle' : 'session' },
-    { label: 'Weekly Sonnet',  pct: sonnetPct,  tokens: stats.sonnetWeek.tokens,  sub: sonnetResets,  color: '#34d399', centerLabel: 'sonnet'                   },
-    { label: 'Weekly (7 day)', pct: weekPct,    tokens: stats.week.tokens,        sub: weekResets,    color: '#60a5fa', centerLabel: '7-day'                    },
+    { label: sessionLabel,     pct: sessionPct, tokens: stats.session5h.tokens,   sub: sessionResets, color: SESSION_COLOR, centerLabel: isIdle ? 'idle' : 'session' },
+    { label: 'Weekly Sonnet',  pct: sonnetPct,  tokens: stats.sonnetWeek.tokens,  sub: sonnetResets,  color: SONNET_COLOR,  centerLabel: 'sonnet'                   },
+    { label: 'Weekly (7 day)', pct: weekPct,    tokens: stats.week.tokens,        sub: weekResets,    color: WEEK_COLOR,    centerLabel: '7-day'                    },
   ];
 
   const active = hovered !== null ? rows[hovered] : rows[0];
@@ -315,9 +319,9 @@ function ConcentricRings({ stats, limits, usageLimits, onEditLimits }: {
     <Block>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <svg width={180} height={180} style={{ flexShrink: 0 }}>
-          <Ring r={72} stroke={10} pct={weekPct}    color="#60a5fa" />
-          <Ring r={54} stroke={10} pct={sonnetPct}  color="#34d399" />
-          <Ring r={36} stroke={10} pct={sessionPct} color="#a78bfa" />
+          <Ring r={72} stroke={10} pct={weekPct}    color={WEEK_COLOR}    />
+          <Ring r={54} stroke={10} pct={sonnetPct}  color={SONNET_COLOR}  />
+          <Ring r={36} stroke={10} pct={sessionPct} color={SESSION_COLOR} />
           {/* Invisible hit areas for each ring */}
           <circle cx={90} cy={90} r={72} fill="none" stroke="transparent" strokeWidth={20} style={{ cursor: 'default' }} onMouseEnter={() => setHovered(2)} onMouseLeave={() => setHovered(null)} />
           <circle cx={90} cy={90} r={54} fill="none" stroke="transparent" strokeWidth={20} style={{ cursor: 'default' }} onMouseEnter={() => setHovered(1)} onMouseLeave={() => setHovered(null)} />
@@ -390,8 +394,8 @@ function LimitsEditor({ limits, onSave, onCancel }: { limits: ClaudeLimits; onSa
         <button
           onClick={() => onSave(vals)}
           style={{
-            flex: 1, padding: '5px 0', background: 'rgba(96,165,250,0.2)', border: '1px solid rgba(96,165,250,0.3)',
-            borderRadius: 6, color: '#93c5fd', fontSize: 10, fontFamily: 'monospace', cursor: 'pointer',
+            flex: 1, padding: '5px 0', background: 'rgba(193,95,60,0.2)', border: '1px solid rgba(193,95,60,0.3)',
+            borderRadius: 6, color: '#C15F3C', fontSize: 10, fontFamily: 'monospace', cursor: 'pointer',
           }}
         >save</button>
         <button
@@ -509,8 +513,8 @@ function ActivityHeatmap({ activityByDay }: { activityByDay: Record<string, numb
                         borderRadius: 2,
                         background: day.count === 0
                           ? 'rgba(255,255,255,0.06)'
-                          : `rgba(96,165,250,${opacity})`,
-                        outline: day.isToday ? '1px solid rgba(96,165,250,0.6)' : 'none',
+                          : `rgba(193,95,60,${opacity})`,
+                        outline: day.isToday ? '1px solid rgba(193,95,60,0.6)' : 'none',
                       }}
                     />
                   );
@@ -586,7 +590,7 @@ function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
                   </span>
                 </div>
                 <div style={{ height: 2, background: 'rgba(255,255,255,0.07)', borderRadius: 1 }}>
-                  <div style={{ height: '100%', width: `${pct * 100}%`, background: '#60a5fa', borderRadius: 1, opacity: 0.65 }} />
+                  <div style={{ height: '100%', width: `${pct * 100}%`, background: '#C15F3C', borderRadius: 1, opacity: 0.65 }} />
                 </div>
               </div>
             );
@@ -748,8 +752,8 @@ export default function App() {
             <button key={id} onClick={() => setTab(id as Tab)} style={{
               padding: '4px 12px',
               border: 'none', borderRadius: 7, cursor: 'pointer',
-              background: tab === id ? 'rgba(96,165,250,0.18)' : 'transparent',
-              color: tab === id ? '#93c5fd' : 'rgba(255,255,255,0.35)',
+              background: tab === id ? 'rgba(193,95,60,0.18)' : 'transparent',
+              color: tab === id ? '#C15F3C' : 'rgba(255,255,255,0.35)',
               fontSize: 11, fontWeight: tab === id ? 600 : 400,
             }}>
               {label}
