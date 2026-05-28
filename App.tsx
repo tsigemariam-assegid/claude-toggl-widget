@@ -302,10 +302,11 @@ function ConcentricRings({ stats, limits, usageLimits, onEditLimits }: {
   const sessionCount = stats.activeSessions.length;
   const sessionLabel = sessionCount > 1 ? `Session (5hr) ×${sessionCount}` : 'Session (5hr)';
 
+  // List order: inner → middle → outer
   const rows = [
-    { label: sessionLabel,     pct: sessionPct, tokens: stats.session5h.tokens,  sub: sessionResets, color: '#a78bfa', centerLabel: isIdle ? 'idle' : 'session' },
-    { label: 'Weekly (7 day)', pct: weekPct,    tokens: stats.week.tokens,        sub: weekResets,    color: '#60a5fa', centerLabel: '7-day'   },
-    { label: 'Weekly Sonnet',  pct: sonnetPct,  tokens: stats.sonnetWeek.tokens,  sub: sonnetResets,  color: '#34d399', centerLabel: 'sonnet'  },
+    { label: sessionLabel,     pct: sessionPct, tokens: stats.session5h.tokens,   sub: sessionResets, color: '#a78bfa', centerLabel: isIdle ? 'idle' : 'session' },
+    { label: 'Weekly Sonnet',  pct: sonnetPct,  tokens: stats.sonnetWeek.tokens,  sub: sonnetResets,  color: '#34d399', centerLabel: 'sonnet'                   },
+    { label: 'Weekly (7 day)', pct: weekPct,    tokens: stats.week.tokens,        sub: weekResets,    color: '#60a5fa', centerLabel: '7-day'                    },
   ];
 
   const active = hovered !== null ? rows[hovered] : rows[0];
@@ -318,8 +319,8 @@ function ConcentricRings({ stats, limits, usageLimits, onEditLimits }: {
           <Ring r={54} stroke={10} pct={sonnetPct}  color="#34d399" />
           <Ring r={36} stroke={10} pct={sessionPct} color="#a78bfa" />
           {/* Invisible hit areas for each ring */}
-          <circle cx={90} cy={90} r={72} fill="none" stroke="transparent" strokeWidth={20} style={{ cursor: 'default' }} onMouseEnter={() => setHovered(1)} onMouseLeave={() => setHovered(null)} />
-          <circle cx={90} cy={90} r={54} fill="none" stroke="transparent" strokeWidth={20} style={{ cursor: 'default' }} onMouseEnter={() => setHovered(2)} onMouseLeave={() => setHovered(null)} />
+          <circle cx={90} cy={90} r={72} fill="none" stroke="transparent" strokeWidth={20} style={{ cursor: 'default' }} onMouseEnter={() => setHovered(2)} onMouseLeave={() => setHovered(null)} />
+          <circle cx={90} cy={90} r={54} fill="none" stroke="transparent" strokeWidth={20} style={{ cursor: 'default' }} onMouseEnter={() => setHovered(1)} onMouseLeave={() => setHovered(null)} />
           <circle cx={90} cy={90} r={36} fill="none" stroke="transparent" strokeWidth={20} style={{ cursor: 'default' }} onMouseEnter={() => setHovered(0)} onMouseLeave={() => setHovered(null)} />
           <text x={90} y={84} textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize={9} fontFamily="monospace">{active.centerLabel}</text>
           <text x={90} y={99} textAnchor="middle" fill={active.color} fontSize={13} fontFamily="monospace" fontWeight="600">
