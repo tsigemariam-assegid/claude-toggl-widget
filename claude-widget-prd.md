@@ -90,6 +90,10 @@ Toggl Track API v9. Authenticated with a personal API token (HTTP Basic, stored 
 **Claude tab**
 - Toggle: Today / Week / Total.
 - Stat grid: tokens, cost, sessions, messages.
+- Concentric rings showing quota utilization (outermost → innermost): Weekly (7-day), Weekly Sonnet, Session (5hr).
+- Session ring shows idle state ("idle · last Xm ago") when no activity in the last 5 hours.
+- Session ring label shows `×N` when N concurrent Claude Code sessions are active in the window.
+- Ring reset countdowns derived from file data when the Anthropic API is unavailable.
 - Hourly activity bar chart (today view only).
 - Project breakdown with proportional bars (top 4).
 - Model breakdown with token count and cost per model.
@@ -163,7 +167,10 @@ claude-widget/
 | Historical charts (30d, all time) | | ✓ |
 | Cache efficiency metric | | ✓ |
 | Toggl start/stop timer | | ✓ |
-| Streak tracking | | ✓ |
+| Streak tracking | ✓ | |
+| Multi-session tracking (concurrent terminals) | ✓ | |
+| Idle state for session ring | ✓ | |
+| API-anchored rolling windows | ✓ | |
 | Packaged .app / auto-update | | ✓ |
 
 ---
@@ -173,5 +180,5 @@ claude-widget/
 - **Pricing accuracy** — model prices in `parser.ts` are estimates. Verify against anthropic.com/pricing before relying on cost figures.
 - **CORS in production** — Toggl fetch runs in the renderer. If blocked in the packaged app, move the call to the main process.
 - **Icon asset** — a 22×22px monochrome PNG is needed for the tray. Without it the tray shows blank (title label still works).
-- **Week definition** — currently "last 7 rolling days". Should it be Mon–Sun calendar week?
+- **Week definition** — rolling 7 days anchored to `sevenDay.resetsAt` from the Anthropic API when available; otherwise `now - 7d`. Calendar-week alignment is not planned.
 - **Toggl workspace** — current implementation fetches from the default workspace. Multi-workspace users may need a selector.

@@ -33,14 +33,28 @@ export interface ProjectStats {
   messages: number;
 }
 
+export interface ActiveSession {
+  sessionId: string;
+  project: string;
+  tokens: number;
+  cost: number;
+  messages: number;
+  startedAt: string;
+  lastActivityAt: string;
+}
+
 export interface ClaudeStats {
   today: { tokens: number; cost: number; sessions: number; messages: number };
   week:  { tokens: number; cost: number; sessions: number; messages: number };
   total: { tokens: number; cost: number; sessions: number; messages: number };
   currentSession: { tokens: number; cost: number; startedAt: string };
   session5h: { tokens: number; cost: number; messages: number; windowStart: string; oldestTimestamp: string | null };
+  session5hResetsAt: string | null;
   sonnetWeek: { tokens: number; cost: number; oldestTimestamp: string | null };
   weekOldestTimestamp: string | null;
+  weekResetsAt: string | null;
+  activeSessions: ActiveSession[];
+  lastSessionAt: string | null;
   byProject: ProjectStats[];
   byModel: { model: string; tokens: number; cost: number }[];
   activityByHour: number[];   // index = hour 0-23, value = message count (today only)
@@ -127,7 +141,12 @@ function sumRecords(records: UsageRecord[]) {
   };
 }
 
-export async function getClaudeStats(): Promise<ClaudeStats> {
+export interface WindowAnchors {
+  fiveHourResetsAt?: string;  // from Anthropic API — used to derive precise window start
+  sevenDayResetsAt?: string;
+}
+
+export async function getClaudeStats(anchors?: WindowAnchors): Promise<ClaudeStats> {
   if (!fs.existsSync(CLAUDE_DIR)) {
     throw new Error(`Claude projects dir not found: ${CLAUDE_DIR}`);
   }
@@ -144,7 +163,15 @@ export async function getClaudeStats(): Promise<ClaudeStats> {
 
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
-  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  // Use API-anchored window starts when available — matches Anthropic's server-side boundaries
+  const fiveHoursAgo = anchors?.fiveHourResetsAt
+    ? new Date(new Date(anchors.fiveHourResetsAt).getTime() - 5 * 60 * 60 * 1000).toISOString()
+    : new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString();
+
+  const weekAgo = anchors?.sevenDayResetsAt
+    ? new Date(new Date(anchors.sevenDayResetsAt).getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    : new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
   const todayRecords = allRecords.filter(r => r.timestamp.startsWith(todayStr));
   const weekRecords  = allRecords.filter(r => r.timestamp >= weekAgo);
@@ -196,7 +223,6 @@ export async function getClaudeStats(): Promise<ClaudeStats> {
   };
 
   // 5-hour session window (matches Anthropic's rolling session quota window)
-  const fiveHoursAgo = new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString();
   const session5hRecs = allRecords.filter(r => r.timestamp >= fiveHoursAgo);
   const session5hSum = sumRecords(session5hRecs);
   const session5h = {
@@ -206,6 +232,32 @@ export async function getClaudeStats(): Promise<ClaudeStats> {
     windowStart: fiveHoursAgo,
     oldestTimestamp: session5hRecs[0]?.timestamp ?? null,
   };
+
+  // Prefer API resetsAt (authoritative); fall back to deriving from oldest local record
+  const session5hResetsAt = anchors?.fiveHourResetsAt
+    ?? (session5hRecs.length > 0
+      ? new Date(new Date(session5hRecs[0].timestamp).getTime() + 5 * 60 * 60 * 1000).toISOString()
+      : null);
+
+  const weekResetsAt = anchors?.sevenDayResetsAt
+    ?? (weekRecords.length > 0
+      ? new Date(new Date(weekRecords[0].timestamp).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
+      : null);
+
+  // Active sessions: distinct sessionIds with any record in last 5h
+  const active5hGroups = groupBy(session5hRecs, r => r.sessionId);
+  const activeSessions: ActiveSession[] = Object.entries(active5hGroups).map(([sid, recs]) => ({
+    sessionId: sid,
+    project: recs[recs.length - 1].project,
+    tokens: recs.reduce((s, r) => s + r.inputTokens + r.outputTokens, 0),
+    cost:   recs.reduce((s, r) => s + r.cost, 0),
+    messages: recs.length,
+    startedAt: recs[0].timestamp,
+    lastActivityAt: recs[recs.length - 1].timestamp,
+  })).sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
+
+  // Timestamp of the most recent message across all time (for idle display)
+  const lastSessionAt = allRecords.length > 0 ? allRecords[allRecords.length - 1].timestamp : null;
 
   // Sonnet-only weekly usage
   const sonnetWeekRecs = weekRecords.filter(r => r.model.includes('sonnet'));
@@ -222,8 +274,12 @@ export async function getClaudeStats(): Promise<ClaudeStats> {
     total: sumRecords(allRecords),
     currentSession,
     session5h,
+    session5hResetsAt,
     sonnetWeek,
     weekOldestTimestamp: weekRecords[0]?.timestamp ?? null,
+    weekResetsAt,
+    activeSessions,
+    lastSessionAt,
     byProject,
     byModel,
     activityByHour,

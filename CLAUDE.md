@@ -41,7 +41,14 @@ This is a macOS menu bar app built with Electron 30 + React 18 + TypeScript, bun
 2. `main.ts` sets up an `fs.watch` on `~/.claude/projects/` and calls `getClaudeStats()` on every `.jsonl` change (falls back to 30s polling if watch fails). Stats are pushed to the renderer via `stats-update` IPC push, and the tray title is updated with the current streak count.
 3. `toggl.ts` is a thin Toggl Track API v9 client. It fetches time entries and project metadata for the last 7 days. Called on demand (renderer calls `getTogglStats`) and polled every 60s from the renderer.
 4. The Toggl API token is stored encrypted on disk using `safeStorage` (macOS Keychain) at `app.getPath('userData')/toggl-token.enc`. IPC handlers `get-toggl-token` / `save-toggl-token` handle read/write.
-5. `main.ts` reads the Claude Code OAuth token from the macOS Keychain (`"Claude Code-credentials"`) and calls `https://api.anthropic.com/api/oauth/usage` to fetch real quota utilization and reset timestamps. Polled every 5 minutes from the renderer via `get-usage-limits`.
+5. `main.ts` reads the Claude Code OAuth token from the macOS Keychain (`"Claude Code-credentials"`) and calls `https://api.anthropic.com/api/oauth/usage` to fetch real quota utilization and reset timestamps. The result is cached in `cachedUsageLimits` and polled every 5 minutes from the main process (seeded at startup). The renderer can also trigger a refresh via `get-usage-limits` IPC, which updates the same cache. The cached `resetsAt` timestamps are passed to `getClaudeStats()` as `WindowAnchors` so the parser uses Anthropic's exact server-side window boundaries instead of `now - N` approximations.
+
+**Rolling window logic (`parser.ts`):**
+- `session5h` — 5-hour rolling window. When `WindowAnchors.fiveHourResetsAt` is provided, the window start is `resetsAt - 5h` (matching Anthropic's boundary exactly); otherwise falls back to `now - 5h`.
+- `week` / `sonnetWeek` — 7-day rolling window, same anchor pattern with `sevenDayResetsAt`.
+- `session5hResetsAt` / `weekResetsAt` — returned in `ClaudeStats`. Prefer the API's `resetsAt` value; fall back to deriving from the oldest record in the window (`oldestTimestamp + windowDuration`). The UI uses these for the reset countdown without needing the Anthropic API to be available.
+- `activeSessions` — list of distinct `sessionId`s with any record in the 5h window, with per-session token/cost/message counts. Enables tracking multiple concurrent Claude Code terminals.
+- `lastSessionAt` — timestamp of the most recent message across all time, used to show an idle state ("idle · last Xm ago") when the 5h window is empty.
 
 **IPC channels** (all invocable via `window.claudeAPI`):
 | Channel | Direction | Handler file |
