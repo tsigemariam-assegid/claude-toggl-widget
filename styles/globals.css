@@ -1,0 +1,104 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* App is always dark — :root and .dark hold the same values, mapped from the
+   existing inline-style palette so shadcn components inherit the current look. */
+:root {
+  --radius: 0.5rem;
+
+  /* NOTE: --background is intentionally NOT applied to <body> (see @layer base).
+     The macOS glass/vibrancy lives on the app root div; body stays transparent. */
+  --background: #0a0c10;
+  --foreground: #f1f5f9;
+
+  --card: rgba(255, 255, 255, 0.04);
+  --card-foreground: #f1f5f9;
+
+  /* Overlays (Dialog/Drawer/Popover/Select) need a mostly-opaque surface so
+     content stays legible above the translucent window. */
+  --popover: rgba(18, 20, 25, 0.98);
+  --popover-foreground: #f1f5f9;
+
+  --primary: #c15f3c;
+  --primary-foreground: #ffffff;
+
+  --secondary: rgba(255, 255, 255, 0.07);
+  --secondary-foreground: #f1f5f9;
+
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: rgba(255, 255, 255, 0.45);
+
+  --accent: rgba(255, 255, 255, 0.08);
+  --accent-foreground: #f1f5f9;
+
+  --destructive: #f87171;
+  --destructive-foreground: #ffffff;
+
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #c15f3c;
+}
+
+.dark {
+  --background: #0a0c10;
+  --foreground: #f1f5f9;
+  --card: rgba(255, 255, 255, 0.04);
+  --card-foreground: #f1f5f9;
+  --popover: rgba(18, 20, 25, 0.98);
+  --popover-foreground: #f1f5f9;
+  --primary: #c15f3c;
+  --primary-foreground: #ffffff;
+  --secondary: rgba(255, 255, 255, 0.07);
+  --secondary-foreground: #f1f5f9;
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: rgba(255, 255, 255, 0.45);
+  --accent: rgba(255, 255, 255, 0.08);
+  --accent-foreground: #f1f5f9;
+  --destructive: #f87171;
+  --destructive-foreground: #ffffff;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #c15f3c;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  /* IMPORTANT: do NOT set a background on <body> — the Electron window relies on
+     a transparent body for its blur/vibrancy. Only set text color. */
+  body {
+    color: var(--foreground);
+  }
+}
