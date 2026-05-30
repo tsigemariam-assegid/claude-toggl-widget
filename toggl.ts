@@ -77,13 +77,30 @@ async function fetchToggl<T>(apiToken: string, path: string): Promise<T> {
 
   if (!res.ok) {
     if (res.status === 403) throw new Error('Invalid Toggl API token');
-    throw new Error(`Toggl API error: ${res.status}`);
+    throw new Error(`Toggl API error: ${res.status}${await errBody(res)}`);
   }
 
   return res.json() as Promise<T>;
 }
 
-export async function getTogglStats(apiToken: string): Promise<TogglStats> {
+// Toggl returns a plain-text or JSON reason in the body on 4xx; surface it so
+// failures are diagnosable instead of an opaque status code.
+async function errBody(res: Response): Promise<string> {
+  try {
+    const text = (await res.text()).trim();
+    return text ? ` — ${text.slice(0, 300)}` : '';
+  } catch { return ''; }
+}
+
+// Project metadata (id → name/color). Fetched separately and cached by the
+// caller, because it rarely changes and counts against Toggl's hourly rate cap.
+export async function fetchTogglProjects(apiToken: string): Promise<TogglProject[]> {
+  return (await fetchToggl<TogglProject[] | null>(apiToken, '/me/projects')) ?? [];
+}
+
+// `projects` is supplied by the caller (from its persistent cache) so name
+// resolution survives a rate-limited /me/projects fetch.
+export async function getTogglStats(apiToken: string, projects: TogglProject[] = []): Promise<TogglStats> {
   const todayStart = startOfDay(new Date());
   const weekStart  = daysAgo(7);
 
@@ -92,14 +109,6 @@ export async function getTogglStats(apiToken: string): Promise<TogglStats> {
     apiToken,
     `/me/time_entries?start_date=${encodeURIComponent(weekStart)}&end_date=${encodeURIComponent(new Date().toISOString())}`
   );
-
-  // Fetch projects for name lookup
-  let projects: TogglProject[] = [];
-  try {
-    projects = await fetchToggl<TogglProject[]>(apiToken, '/me/projects');
-  } catch {
-    // non-fatal — show project IDs as fallback
-  }
 
   const projectMap = new Map(projects.map(p => [p.id, p]));
 
@@ -175,7 +184,7 @@ async function fetchTogglPost<T>(apiToken: string, urlPath: string, body: unknow
   });
   if (!res.ok) {
     if (res.status === 403) throw new Error('Invalid Toggl API token');
-    throw new Error(`Toggl API error: ${res.status}`);
+    throw new Error(`Toggl API error: ${res.status}${await errBody(res)}`);
   }
   return res.json() as Promise<T>;
 }
@@ -214,14 +223,17 @@ export async function createTimeEntry(
   start: string,
   stop: string,
 ): Promise<number> {
-  const duration = Math.round((new Date(stop).getTime() - new Date(start).getTime()) / 1000);
+  // Send start + a positive duration and let Toggl derive stop. Sending all
+  // three (start, stop, duration) triggers Toggl's "Stop and duration mismatch"
+  // 400, because Toggl truncates the timestamps to whole seconds and recomputes
+  // the duration, which can differ from ours by ±1s of millisecond rounding.
+  const duration = Math.max(1, Math.round((new Date(stop).getTime() - new Date(start).getTime()) / 1000));
   const entry = await fetchTogglPost<TogglEntry>(apiToken, `/workspaces/${workspaceId}/time_entries`, {
     created_with: 'claude-widget',
     description,
     duration,
     project_id: projectId,
     start,
-    stop,
     tag_ids: [tagId],
     workspace_id: workspaceId,
   });

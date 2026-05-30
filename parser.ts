@@ -15,6 +15,7 @@ const PRICING: Record<string, { input: number; output: number; cacheCreate: numb
 
 export interface UsageRecord {
   timestamp: string;       // ISO string
+  uuid: string;            // unique per assistant message; stable across session resumes/forks
   sessionId: string;
   project: string;         // derived from cwd basename
   model: string;
@@ -99,6 +100,7 @@ async function parseFile(filePath: string): Promise<UsageRecord[]> {
 
         records.push({
           timestamp: entry.timestamp ?? new Date().toISOString(),
+          uuid: entry.uuid ?? '',
           sessionId: entry.sessionId ?? '',
           project,
           model,
@@ -170,9 +172,23 @@ export async function getClaudeWorkBlocks(days: number): Promise<WorkBlock[]> {
   }
   allRecords.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
+  // A resumed/forked Claude session re-writes the prior messages into a new
+  // session file with a new sessionId but the SAME message `uuid`. Without
+  // this dedup the same work is segmented under each sessionId, producing
+  // duplicate and overlapping Toggl entries. Keep the first occurrence of
+  // each uuid (stable, since records are already timestamp-sorted). Records
+  // with no uuid (shouldn't happen for assistant messages) are kept as-is.
+  const seenUuids = new Set<string>();
+  const deduped = allRecords.filter(r => {
+    if (!r.uuid) return true;
+    if (seenUuids.has(r.uuid)) return false;
+    seenUuids.add(r.uuid);
+    return true;
+  });
+
   const cutoff          = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const completedBefore = new Date(Date.now() - IDLE_GAP_MS).toISOString();
-  const recent = allRecords.filter(r => r.timestamp >= cutoff);
+  const recent = deduped.filter(r => r.timestamp >= cutoff);
 
   const bySession = groupBy(recent, r => r.sessionId);
   const blocks: WorkBlock[] = [];

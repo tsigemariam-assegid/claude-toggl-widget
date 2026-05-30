@@ -13,8 +13,8 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import https from 'https';
 import { getClaudeStats, getClaudeWorkBlocks } from './parser';
-import { getTogglStats, getWorkspaceId, getOrCreateProject, getOrCreateTag, createTimeEntry } from './toggl';
-import type { TogglStats } from './toggl';
+import { getTogglStats, fetchTogglProjects, getWorkspaceId, getOrCreateProject, getOrCreateTag, createTimeEntry } from './toggl';
+import type { TogglStats, TogglProject } from './toggl';
 
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
@@ -39,6 +39,63 @@ function loadTogglCache(): TogglStats | null {
 }
 function saveTogglCache(stats: TogglStats): void {
   try { fs.writeFileSync(togglCachePath(), JSON.stringify(stats)); } catch {}
+}
+
+// Toggl project metadata changes rarely but counts against the hourly rate cap,
+// so it's fetched infrequently and cached on disk. Caching it also keeps real
+// project names showing during a rate-limited window instead of "Project <id>".
+let cachedProjects: TogglProject[] = [];
+let projectsFetchedAt = 0;
+const PROJECTS_TTL_MS = 30 * 60 * 1000;
+function projectsCachePath(): string {
+  return path.join(app.getPath('userData'), 'toggl-projects-cache.json');
+}
+function loadProjectsCache(): TogglProject[] {
+  try {
+    const p = projectsCachePath();
+    if (!fs.existsSync(p)) return [];
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch { return []; }
+}
+function saveProjectsCache(projects: TogglProject[]): void {
+  try { fs.writeFileSync(projectsCachePath(), JSON.stringify(projects)); } catch {}
+}
+
+// ── Toggl rate-limit gate ───────────────────────────────────────────────────────
+// Toggl's free tier allows 30 requests/hour. When we exceed it the API returns
+// 402/429 and tells us when the quota resets. We honor that: no Toggl request is
+// made while blocked, so we stop wasting calls and recover cleanly. Persisted so
+// a restart (e.g. a code change) doesn't immediately hammer a still-limited API.
+let togglBlockedUntil = 0; // epoch ms
+function rateLimitPath(): string {
+  return path.join(app.getPath('userData'), 'toggl-ratelimit.json');
+}
+function loadRateLimit(): void {
+  try { togglBlockedUntil = JSON.parse(fs.readFileSync(rateLimitPath(), 'utf8')).blockedUntil ?? 0; }
+  catch { togglBlockedUntil = 0; }
+}
+function saveRateLimit(): void {
+  try { fs.writeFileSync(rateLimitPath(), JSON.stringify({ blockedUntil: togglBlockedUntil })); } catch {}
+}
+function togglBlockedMs(): number {
+  return Math.max(0, togglBlockedUntil - Date.now());
+}
+// If err is a Toggl rate-limit error, set the backoff window from its reset hint.
+function noteTogglError(err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!/\b402\b|\b429\b|hourly limit|Too Many Requests/i.test(msg)) return;
+  const m = msg.match(/reset in (\d+) seconds/i);
+  const secs = m ? parseInt(m[1], 10) : 15 * 60; // default 15 min if no hint
+  togglBlockedUntil = Date.now() + secs * 1000;
+  saveRateLimit();
+  console.log(`[toggl] rate-limited — pausing Toggl calls for ${Math.ceil(secs / 60)}m`);
+}
+
+interface ApprovedEntry {
+  blockKey: string;     // original block key, for dedup (unchanged even if start was edited)
+  description: string;
+  start: string;        // ISO
+  stop: string;         // ISO
 }
 
 interface SyncState {
@@ -277,12 +334,38 @@ app.whenReady().then(async () => {
   });
 
   // Toggl IPC
+  loadRateLimit();
+  cachedProjects = loadProjectsCache(); // seed names from disk so they show immediately
   ipcMain.handle('get-toggl-stats', async (_event, token: string) => {
+    // While rate-limited, spend no calls — serve the last cached stats.
+    if (togglBlockedMs() > 0) {
+      const cached = loadTogglCache();
+      if (cached) return cached;
+      throw new Error(`Toggl rate-limited — retry in ${Math.ceil(togglBlockedMs() / 60000)}m`);
+    }
+    // Refresh project metadata only occasionally (it rarely changes) to keep the
+    // per-poll request count — and thus the hourly rate usage — low.
+    if (cachedProjects.length === 0 || Date.now() - projectsFetchedAt > PROJECTS_TTL_MS) {
+      try {
+        const fresh = await fetchTogglProjects(token);
+        if (fresh.length > 0) {
+          cachedProjects = fresh; projectsFetchedAt = Date.now(); saveProjectsCache(fresh);
+        }
+      } catch (e) {
+        noteTogglError(e); // a rate-limit here blocks the time-entries call below too
+      }
+    }
+    if (togglBlockedMs() > 0) {
+      const cached = loadTogglCache();
+      if (cached) return cached;
+      throw new Error(`Toggl rate-limited — retry in ${Math.ceil(togglBlockedMs() / 60000)}m`);
+    }
     try {
-      const stats = await getTogglStats(token);
+      const stats = await getTogglStats(token, cachedProjects);
       saveTogglCache(stats);
       return stats;
     } catch (err) {
+      noteTogglError(err);
       const cached = loadTogglCache();
       if (cached) return cached;
       throw err;
@@ -303,43 +386,86 @@ app.whenReady().then(async () => {
     fs.writeFileSync(tokenPath(), encrypted);
   });
 
-  ipcMain.handle('sync-claude-to-toggl', async (_event, token: string) => {
+  // Return the de-duped, not-yet-synced work blocks so the renderer can show a
+  // review list. Nothing is pushed to Toggl here.
+  ipcMain.handle('get-toggl-sync-preview', async () => {
     const blocks = await getClaudeWorkBlocks(7);
     const state  = loadSyncState();
-    const unsynced = blocks.filter(b => !state.syncedBlocks[b.blockKey]);
+    return blocks.filter(b => !state.syncedBlocks[b.blockKey]);
+  });
 
-    if (unsynced.length === 0) {
+  // Push only the entries the user approved (with any edits to title/start/stop).
+  // Each entry carries its original blockKey so dedup still works even if the
+  // displayed start was edited.
+  ipcMain.handle('sync-claude-to-toggl', async (_event, token: string, entries: ApprovedEntry[]) => {
+    const state = loadSyncState();
+    const pending = entries.filter(e => !state.syncedBlocks[e.blockKey]);
+
+    const rateLimitedResult = () => {
       state.lastSyncAt = new Date().toISOString();
       saveSyncState(state);
-      return { synced: 0, lastSyncAt: state.lastSyncAt };
-    }
+      return { synced: 0, failed: pending.length, firstError: `Toggl rate-limited — retry in ${Math.ceil(togglBlockedMs() / 60000)}m`, lastSyncAt: state.lastSyncAt };
+    };
 
-    if (!state.cachedWorkspaceId) {
-      state.cachedWorkspaceId = await getWorkspaceId(token);
+    if (pending.length === 0) {
+      state.lastSyncAt = new Date().toISOString();
+      saveSyncState(state);
+      return { synced: 0, failed: 0, firstError: null, lastSyncAt: state.lastSyncAt };
+    }
+    if (togglBlockedMs() > 0) return rateLimitedResult();
+
+    // One-time setup calls — IDs are persisted in sync state, so this is paid once.
+    try {
+      if (!state.cachedWorkspaceId) state.cachedWorkspaceId = await getWorkspaceId(token);
+      if (!state.cachedProjectId)   state.cachedProjectId   = await getOrCreateProject(token, state.cachedWorkspaceId, 'Side Project');
+      if (!state.cachedTagId)       state.cachedTagId       = await getOrCreateTag(token, state.cachedWorkspaceId, 'coding');
+      saveSyncState(state);
+    } catch (err) {
+      noteTogglError(err);
+      if (togglBlockedMs() > 0) return rateLimitedResult();
+      throw err;
     }
     const wid = state.cachedWorkspaceId!;
-
-    if (!state.cachedProjectId) {
-      state.cachedProjectId = await getOrCreateProject(token, wid, 'Side Project');
-    }
     const projectId = state.cachedProjectId!;
-
-    if (!state.cachedTagId) {
-      state.cachedTagId = await getOrCreateTag(token, wid, 'coding');
-    }
     const tagId = state.cachedTagId!;
 
     let synced = 0;
-    for (const block of unsynced) {
-      const entryId = await createTimeEntry(token, wid, projectId, tagId, block.project, block.start, block.stop);
-      state.syncedBlocks[block.blockKey] = { togglEntryId: entryId, syncedAt: new Date().toISOString() };
-      synced++;
-      saveSyncState(state); // save after each entry so partial progress survives errors
+    let failed = 0;
+    let firstError: string | null = null;
+    let stoppedForRateLimit = false;
+    for (const entry of pending) {
+      try {
+        const entryId = await createTimeEntry(token, wid, projectId, tagId, entry.description, entry.start, entry.stop);
+        state.syncedBlocks[entry.blockKey] = { togglEntryId: entryId, syncedAt: new Date().toISOString() };
+        synced++;
+        saveSyncState(state); // persist after each entry so partial progress survives a later failure
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        noteTogglError(err);
+        if (togglBlockedMs() > 0) {
+          // Hit the rate limit — stop hammering. Remaining entries stay unsynced
+          // and retry on the next push once the quota resets.
+          stoppedForRateLimit = true;
+          if (!firstError) firstError = msg;
+          break;
+        }
+        // Otherwise skip this one entry and keep going — one malformed entry
+        // must not abort the batch. Not recorded, so it retries next time.
+        failed++;
+        if (!firstError) firstError = msg;
+        console.error(`[sync] block ${entry.blockKey} failed:`, msg);
+      }
+    }
+
+    if (stoppedForRateLimit) {
+      const untried = pending.length - synced - failed;
+      firstError = `Toggl rate-limited after ${synced} — ${untried} left, retry in ${Math.ceil(togglBlockedMs() / 60000)}m`;
+      failed += untried;
     }
 
     state.lastSyncAt = new Date().toISOString();
     saveSyncState(state);
-    return { synced, lastSyncAt: state.lastSyncAt };
+    return { synced, failed, firstError, lastSyncAt: state.lastSyncAt };
   });
 
   // Seed from disk instantly so a fresh restart never shows null limits (which

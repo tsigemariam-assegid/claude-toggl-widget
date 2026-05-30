@@ -70,7 +70,11 @@ declare global {
       onStatsUpdate:     (cb: (s: ClaudeStats) => void) => () => void;
       getTogglToken:     () => Promise<string | null>;
       saveTogglToken:    (token: string) => Promise<void>;
-      syncClaudeToToggl: (token: string) => Promise<{ synced: number; lastSyncAt: string }>;
+      getTogglSyncPreview: () => Promise<{ blockKey: string; project: string; start: string; stop: string; durationSeconds: number }[]>;
+      syncClaudeToToggl: (
+        token: string,
+        entries: { blockKey: string; description: string; start: string; stop: string }[],
+      ) => Promise<{ synced: number; failed: number; firstError: string | null; lastSyncAt: string }>;
     };
   }
 }
@@ -756,21 +760,15 @@ function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
 
 // ── Toggl Panel ────────────────────────────────────────────────────────────────
 
-type SyncStatus = 'idle' | 'syncing' | 'done' | 'error';
-
 function TogglPanel({
-  stats, hasToken, onSetToken, onSync, syncStatus, lastSyncResult, syncError, fetchError,
+  stats, token, onSetToken, fetchError,
 }: {
   stats: TogglStats | null;
-  hasToken: boolean;
+  token: string | null;
   onSetToken: (t: string) => void;
-  onSync: () => void;
-  syncStatus: SyncStatus;
-  lastSyncResult: { synced: number; at: string } | null;
-  syncError: string | null;
   fetchError: string | null;
 }) {
-  if (!hasToken) return <TogglTokenInput onSave={onSetToken} />;
+  if (!token) return <TogglTokenInput onSave={onSetToken} />;
 
   if (!stats) return (
     <div style={{ color: fetchError ? '#f87171' : 'rgba(255,255,255,0.3)', fontSize: 11, fontFamily: 'monospace' }}>
@@ -832,31 +830,164 @@ function TogglPanel({
         </Block>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-        <button
-          onClick={onSync}
-          disabled={syncStatus === 'syncing'}
-          style={{
-            padding: '5px 12px',
-            border: 'none', borderRadius: 6,
-            cursor: syncStatus === 'syncing' ? 'default' : 'pointer',
-            background: 'rgba(193,95,60,0.18)',
-            color: syncStatus === 'syncing' ? 'rgba(255,255,255,0.3)' : '#C15F3C',
-            fontSize: 10, fontFamily: 'monospace',
-          }}
-        >
-          {syncStatus === 'syncing' ? 'syncing…' : 'sync claude → toggl'}
-        </button>
-        {syncStatus === 'done' && lastSyncResult && (
-          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>
-            {lastSyncResult.synced > 0 ? `+${lastSyncResult.synced} entr${lastSyncResult.synced === 1 ? 'y' : 'ies'}` : 'up to date'}
-          </span>
-        )}
-        {syncStatus === 'error' && syncError && (
-          <span style={{ fontSize: 9, color: '#f87171', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {syncError}
-          </span>
-        )}
+      <SyncReview token={token} />
+    </div>
+  );
+}
+
+// ── Claude → Toggl review / approve ─────────────────────────────────────────────
+
+type ReviewPhase = 'idle' | 'loading' | 'review' | 'pushing' | 'done' | 'error';
+
+interface ReviewRow {
+  blockKey: string;
+  description: string;   // editable title
+  startLocal: string;    // 'YYYY-MM-DDTHH:mm' (local) for datetime-local input
+  durationMin: number;   // editable, minutes
+  include: boolean;
+}
+
+// ISO (UTC) → 'YYYY-MM-DDTHH:mm' in the user's local time (datetime-local format)
+function isoToLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : 'failed';
+}
+
+function SyncReview({ token }: { token: string }) {
+  const [phase, setPhase]   = useState<ReviewPhase>('idle');
+  const [rows, setRows]     = useState<ReviewRow[]>([]);
+  const [result, setResult] = useState<{ synced: number; failed: number; firstError: string | null } | null>(null);
+  const [error, setError]   = useState<string | null>(null);
+
+  async function loadPreview() {
+    setPhase('loading'); setError(null);
+    try {
+      const blocks = await window.claudeAPI!.getTogglSyncPreview();
+      blocks.sort((a, b) => a.start.localeCompare(b.start));
+      setRows(blocks.map(b => ({
+        blockKey: b.blockKey,
+        description: b.project,
+        startLocal: isoToLocalInput(b.start),
+        durationMin: Math.max(1, Math.round(b.durationSeconds / 60)),
+        include: true,
+      })));
+      setPhase('review');
+    } catch (e) { setError(errMsg(e)); setPhase('error'); }
+  }
+
+  function update(i: number, patch: Partial<ReviewRow>) {
+    setRows(rs => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
+  }
+
+  async function push() {
+    const entries = rows.filter(r => r.include).map(r => {
+      const start = new Date(r.startLocal);                    // parsed as local time
+      const stop  = new Date(start.getTime() + Math.max(1, r.durationMin) * 60_000);
+      return { blockKey: r.blockKey, description: r.description.trim() || 'Claude', start: start.toISOString(), stop: stop.toISOString() };
+    });
+    if (entries.length === 0) return;
+    setPhase('pushing'); setError(null);
+    try {
+      const res = await window.claudeAPI!.syncClaudeToToggl(token, entries);
+      setResult({ synced: res.synced, failed: res.failed, firstError: res.firstError });
+      if (res.synced === 0 && res.failed > 0 && res.firstError) { setError(res.firstError); setPhase('error'); }
+      else setPhase('done');
+    } catch (e) { setError(errMsg(e)); setPhase('error'); }
+  }
+
+  const btn = (label: string, onClick: () => void, primary = false) => (
+    <button onClick={onClick} style={{
+      padding: '5px 12px', border: 'none', borderRadius: 6, cursor: 'pointer',
+      background: primary ? 'rgba(193,95,60,0.18)' : 'rgba(255,255,255,0.07)',
+      color: primary ? '#C15F3C' : 'rgba(255,255,255,0.55)',
+      fontSize: 10, fontFamily: 'monospace',
+    }}>{label}</button>
+  );
+
+  if (phase === 'idle')    return <div style={{ marginTop: 4 }}>{btn('review claude sessions →', loadPreview, true)}</div>;
+  if (phase === 'loading') return <div style={{ marginTop: 4, fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>scanning sessions…</div>;
+  if (phase === 'pushing') return <div style={{ marginTop: 4, fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>pushing to toggl…</div>;
+
+  if (phase === 'done' && result) return (
+    <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 10, color: result.failed > 0 ? '#fbbf24' : '#6ee7b7', fontFamily: 'monospace' }}>
+          ✓ pushed {result.synced}{result.failed > 0 ? ` · ${result.failed} failed (retry later)` : ''}
+        </span>
+        {btn('review more', () => { setResult(null); loadPreview(); })}
+      </div>
+      {result.failed > 0 && result.firstError && (
+        <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', wordBreak: 'break-word' }}>
+          {result.firstError}
+        </span>
+      )}
+    </div>
+  );
+
+  if (phase === 'error') return (
+    <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 10, color: '#f87171', fontFamily: 'monospace', wordBreak: 'break-word' }}>{error}</span>
+      <div style={{ display: 'flex', gap: 6 }}>{btn('back', () => setPhase(rows.length ? 'review' : 'idle'))}</div>
+    </div>
+  );
+
+  // phase === 'review'
+  const selected = rows.filter(r => r.include);
+  const totalMin = selected.reduce((s, r) => s + Math.max(1, r.durationMin), 0);
+
+  return (
+    <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <SectionLabel>review · approve to push</SectionLabel>
+        <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
+          {selected.length}/{rows.length} · {Math.floor(totalMin / 60)}h {totalMin % 60}m
+        </span>
+      </div>
+
+      {rows.length === 0 && (
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>nothing new to sync</span>
+      )}
+
+      {rows.map((r, i) => (
+        <div key={r.blockKey} style={{
+          background: 'rgba(255,255,255,0.04)', borderRadius: 7, padding: '6px 8px',
+          opacity: r.include ? 1 : 0.45, display: 'flex', flexDirection: 'column', gap: 4,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={r.include} onChange={e => update(i, { include: e.target.checked })}
+                   style={{ accentColor: '#C15F3C', cursor: 'pointer', flexShrink: 0 }} />
+            <input value={r.description} onChange={e => update(i, { description: e.target.value })}
+                   style={{
+                     flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+                     borderRadius: 5, padding: '3px 6px', color: '#f1f5f9', fontSize: 11, fontFamily: 'monospace', outline: 'none',
+                   }} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 22 }}>
+            <input type="datetime-local" value={r.startLocal} onChange={e => update(i, { startLocal: e.target.value })}
+                   style={{
+                     background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5,
+                     padding: '2px 5px', color: 'rgba(255,255,255,0.75)', fontSize: 10, fontFamily: 'monospace',
+                     outline: 'none', colorScheme: 'dark',
+                   }} />
+            <input type="number" min={1} value={r.durationMin}
+                   onChange={e => update(i, { durationMin: Math.max(1, parseInt(e.target.value) || 1) })}
+                   style={{
+                     width: 46, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5,
+                     padding: '2px 5px', color: 'rgba(255,255,255,0.75)', fontSize: 10, fontFamily: 'monospace', outline: 'none',
+                   }} />
+            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>min</span>
+          </div>
+        </div>
+      ))}
+
+      <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
+        {btn(`approve & push (${selected.length})`, push, true)}
+        {btn('cancel', () => setPhase('idle'))}
       </div>
     </div>
   );
@@ -873,9 +1004,6 @@ export default function App() {
   const [togglToken, setTogglToken]           = useState<string | null>(null);
   const [tokenLoaded, setTokenLoaded]         = useState(false);
   const [togglFetchError, setTogglFetchError] = useState<string | null>(null);
-  const [syncStatus, setSyncStatus]           = useState<SyncStatus>('idle');
-  const [lastSyncResult, setLastSyncResult]   = useState<{ synced: number; at: string } | null>(null);
-  const [syncError, setSyncError]             = useState<string | null>(null);
 
   useEffect(() => {
     if (!window.claudeAPI) return;
@@ -898,28 +1026,23 @@ export default function App() {
       window.claudeAPI!.getTogglStats(togglToken)
         .then(s => { setTogglStats(s); setTogglFetchError(null); })
         .catch(err => setTogglFetchError(err instanceof Error ? err.message : 'Toggl error'));
-    fetchStats();
-    const id = setInterval(fetchStats, 3 * 60_000);
-    return () => clearInterval(id);
+
+    // Poll only while the widget is actually visible. The window hides on blur,
+    // so an always-on interval would burn Toggl's hourly call budget for stats
+    // nobody is looking at. Fetch on show, stop when hidden.
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => { if (id) return; fetchStats(); id = setInterval(fetchStats, 3 * 60_000); };
+    const stop  = () => { if (id) { clearInterval(id); id = null; } };
+    const onVisibility = () => (document.visibilityState === 'visible' ? start() : stop());
+
+    onVisibility();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVisibility); };
   }, [togglToken]);
 
   async function handleSetToken(token: string) {
     await window.claudeAPI.saveTogglToken(token);
     setTogglToken(token);
-  }
-
-  async function handleSync() {
-    if (!togglToken || !window.claudeAPI) return;
-    setSyncStatus('syncing');
-    setSyncError(null);
-    try {
-      const result = await window.claudeAPI.syncClaudeToToggl(togglToken);
-      setLastSyncResult({ synced: result.synced, at: result.lastSyncAt });
-      setSyncStatus('done');
-    } catch (err) {
-      setSyncError(err instanceof Error ? err.message : 'sync failed');
-      setSyncStatus('error');
-    }
   }
 
   if (!window.claudeAPI) return (
@@ -987,12 +1110,8 @@ export default function App() {
         {tab === 'toggl' && tokenLoaded && (
           <TogglPanel
             stats={togglStats}
-            hasToken={!!togglToken}
+            token={togglToken}
             onSetToken={handleSetToken}
-            onSync={handleSync}
-            syncStatus={syncStatus}
-            lastSyncResult={lastSyncResult}
-            syncError={syncError}
             fetchError={togglFetchError}
           />
         )}
