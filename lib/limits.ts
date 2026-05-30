@@ -26,7 +26,3 @@ export function loadLimits(): ClaudeLimits {
   } catch { /* ignore */ }
   return { ...DEFAULT_LIMITS };
 }
-
-export function saveLimits(l: ClaudeLimits) {
-  localStorage.setItem(LIMITS_KEY, JSON.stringify(l));
-}

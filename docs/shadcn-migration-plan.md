@@ -12,13 +12,14 @@ Replace the hand-rolled inline-style UI with shadcn/ui components for consistenc
 | Phase | State |
 |---|---|
 | Phase 0 — Tooling | ✅ **Done** |
-| Phase 1 — Primitives | 🟡 **Partial** — `Card` + `Separator` wired; `Button`/`Tabs`/`Badge`/`Skeleton` installed but not yet used |
-| Refactor — modular split | ✅ **Done** (App.tsx 1122 → 131 lines; see structure below) |
+| Phase 1 — Primitives | ✅ **Done** — `Card`, `Separator`, `Tabs`, `Button`, `Skeleton` wired; `Badge` consciously deferred |
+| Refactor — modular split | ✅ **Done** (App.tsx 1122 → ~130 lines; see structure below) |
 | Phase 2 — Forms & overlays | ⬜ Not started |
 | Phase 3 — Charts | ⬜ Not started |
 
 **Installed shadcn components** (`components/ui/`): `card`, `button`, `tabs`, `badge`, `skeleton`, `separator`.
-**Actually used so far**: `card` (via `Block`), `separator` (limits editor group split, value card, hero hairline).
+**Used**: `card` (via `Block`), `separator` (value card divider, hero hairline), `tabs` (full-width header switcher, **underline active style** — see Phase 1 note), `button` (Save token, SyncReview actions), `skeleton` (Claude/Toggl loading states).
+**Deferred — `badge`**: the only badge-like element is the Toggl running-timer pill, which is really a status *banner* — a better fit for Phase 2's `Alert`/`Sonner` than `Badge`. Left as-is rather than forcing it.
 
 ---
 
@@ -32,7 +33,7 @@ Replace the hand-rolled inline-style UI with shadcn/ui components for consistenc
 
 ## Current file structure (post-refactor)
 
-The monolithic `App.tsx` was split. Migration work now targets these files, **not** line numbers in `App.tsx`.
+The monolithic `App.tsx` was split. Migration work now targets these files, **not** line numbers in `App.tsx`. The rules for keeping this layout intact live in `CLAUDE.md` → "Renderer structure rule" (keep `App.tsx` thin, group by domain, no logic in `.tsx`, `@/` imports, shadcn primitives in `components/ui/`).
 
 ```
 App.tsx                       root only (tabs header, window chrome, state)
@@ -54,7 +55,6 @@ components/
     HourBar.tsx               (custom — candidate for Chart)
     ValueCard.tsx             ROI gauge (custom) — uses Separator
     BurnUp.tsx                cumulative SVG (candidate for Chart)
-    LimitsEditor.tsx          form — uses Separator
   toggl/
     TogglPanel.tsx
     TogglTokenInput.tsx
@@ -72,24 +72,23 @@ components/
 - Verified: build emits CSS, glass intact.
 
 ## Theme mapping (done in globals.css)
-`#0a0c10` glass (app root only) · `--card` `rgba(255,255,255,0.04)` · `--border` `rgba(255,255,255,0.08)` · `--input` `0.12` · `--foreground` `#f1f5f9` · `--muted-foreground` `0.45` · `--primary`/`--ring` `#C15F3C` · `--destructive` `#f87171`. Viz colors (`#D4956A`, `#B1ADA1`, `#f59e0b`, `#34d399`, `#6ee7b7`, `#fbbf24`) stay literals in the custom components.
+`#0a0c10` glass (app root only) · `--card` `rgba(255,255,255,0.04)` · `--border` `rgba(255,255,255,0.08)` · `--input` `0.12` · `--foreground` `#f1f5f9` · `--muted-foreground` `0.45` · `--primary`/`--ring` `#C15F3C` · `--accent-bright` `#E08A63` (active-tab text) · `--destructive` `#f87171`. Viz colors (`#D4956A`, `#B1ADA1`, `#f59e0b`, `#34d399`, `#6ee7b7`, `#fbbf24`) stay literals in the custom components.
 
-## Phase 1 — Primitives 🟡 Partial
+**Accent single-sourcing**: the terracotta lives in exactly two declarations, one per consumption model — `--primary` (CSS/`className`, e.g. `after:bg-primary`, `text-accent-bright`) and the `ACCENT` JS const in `lib/constants.ts` (inline-style/SVG `fill`, where `var()` can't resolve). Don't reintroduce raw `#C15F3C`/`#E08A63` literals in components. (Still pending sweep: `ConcentricRings` `SESSION_COLOR`, and the `rgba(193,95,60,…)` alpha tints in `TogglTokenInput`/`SyncReview` → `bg-primary/NN`.)
 
-Done:
+## Phase 1 — Primitives ✅ Done
+
 - **`Block` → `Card`** (`components/primitives.tsx`) — compact overrides `gap-0 rounded-[9px] px-[11px] py-[9px] shadow-none`. Covers every panel; call sites unchanged.
-- **`Separator`** — replaced hand-rolled `1px` dividers in `LimitsEditor` (quota/billing split) and `ValueCard` (vs-Pro row); added the hero card's internal hairline (`ClaudePanel`).
-
-Remaining (installed, not yet wired):
-- **Tabs** — header switcher in `App.tsx` still custom buttons → `Tabs`/`TabsList`/`TabsTrigger`/`TabsContent` (keep `no-drag` on the trigger row).
-- **Button** — `set limits`, Save token (`TogglTokenInput`), sync buttons (`SyncReview` `btn` helper) → `Button` variants.
-- **Badge** — running-timer pill (`TogglPanel`), `+N entries`, streak.
-- **Skeleton** — the `loading…` states in `ClaudePanel` / `TogglPanel`.
+- **`Separator`** — `ValueCard` (vs-Pro row) and the hero card's internal hairline (`ClaudePanel`). (The limits editor that also used one was since removed.)
+- **`Tabs`** — header switcher in `App.tsx` is now controlled `Tabs`/`TabsList`/`TabsTrigger`/`TabsContent`; `TabsList` carries the `no-drag` region. **Style: full-width underline tabs** — `TabsList` is `flex-1` with the two triggers each `flex-1` (split the width); active = brighter `text-accent-bright` + a full-width 3px terracotta underline via `after:` pseudo (`after:bg-primary`); shadcn's default focus ring/border/pill-fill are all neutralized (`focus-visible:ring-0`, no `data-[state=active]:bg`). No text-label emojis. `TabsContent` handles show/hide (no more `tab === …` conditionals in the body).
+- **`Button`** — Save token (`TogglTokenInput`, `size="sm"`) and the SyncReview action buttons (`size="xs"`), styled to preserve the translucent terracotta look.
+- **`Skeleton`** — Claude and Toggl loading states (replaces the `loading…` text; Toggl keeps the red error-text path).
+- **`Badge`** — deferred (see status note above).
 
 ## Phase 2 — Forms & overlays ⬜ Not started
 `npx shadcn@latest add input label checkbox dialog drawer sonner tooltip`
-- **LimitsEditor → `Dialog`** — move the 6 number fields into a Dialog triggered by `set limits` (currently an inline swap inside the hero card).
-- **TogglTokenInput → `Input` + `Button`**.
+- ~~**LimitsEditor → `Dialog`**~~ — **obsolete**: `LimitsEditor.tsx` was removed; limits are now read-only via `loadLimits()` (no in-app editor). Drop `dialog` from the install list unless another use appears.
+- **TogglTokenInput → `Input` + `Button`** — currently a raw `<input>`; the `Button` is already wired, the field is not.
 - **SyncReview list → `Checkbox` + `Input` + `ScrollArea`** in a **`Drawer`**.
 - **Sonner toasts** — replace inline sync result / rate-limit / error strings.
 - **Tooltip** — ring %s and value numbers.

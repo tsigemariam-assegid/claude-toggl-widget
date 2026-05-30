@@ -1,19 +1,19 @@
 import { useEffect, useState } from 'react';
 import type { ClaudeStats, UsageLimitsAPI } from '@/lib/types';
-import { type ClaudeLimits, loadLimits, saveLimits } from '@/lib/limits';
+import { type ClaudeLimits, loadLimits } from '@/lib/limits';
+import { ACCENT } from '@/lib/constants';
 import { cycleSeries, cycleStart, fmtTokens, fmtUSD } from '@/lib/format';
 import { Block, SectionLabel, StatRow } from '@/components/primitives';
 import { Separator } from '@/components/ui/separator';
+import { Skeleton } from '@/components/ui/skeleton';
 import { ActivityHeatmap, StreakCard } from './ActivityHeatmap';
 import { ConcentricRings } from './ConcentricRings';
-import { LimitsEditor } from './LimitsEditor';
 import { HourBar } from './HourBar';
 import { ValueCard } from './ValueCard';
 import { BurnUp } from './BurnUp';
 
 export function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
-  const [limits, setLimits] = useState<ClaudeLimits>(loadLimits);
-  const [editingLimits, setEditingLimits] = useState(false);
+  const [limits] = useState<ClaudeLimits>(loadLimits);
   const [usageLimits, setUsageLimits] = useState<UsageLimitsAPI | null>(null);
 
   useEffect(() => {
@@ -25,14 +25,12 @@ export function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
   }, []);
 
   if (!stats) return (
-    <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 11, fontFamily: 'monospace' }}>loading…</div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <Skeleton className="h-[210px] w-full rounded-[9px]" />
+      <Skeleton className="h-[64px] w-full rounded-[9px]" />
+      <Skeleton className="h-[80px] w-full rounded-[9px]" />
+    </div>
   );
-
-  function handleSaveLimits(l: ClaudeLimits) {
-    saveLimits(l);
-    setLimits(l);
-    setEditingLimits(false);
-  }
 
   const { points, cost: cycleValue, savings: cycleSavings } = cycleSeries(stats.dailyValue, cycleStart(limits.cycleStartDay));
 
@@ -52,22 +50,7 @@ export function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
 
         <Separator className="mt-6 mb-4 bg-white/[0.06]" />
 
-        {editingLimits
-          ? <LimitsEditor limits={limits} onSave={handleSaveLimits} onCancel={() => setEditingLimits(false)} />
-          : <>
-              <ConcentricRings stats={stats} limits={limits} usageLimits={usageLimits} />
-              <button
-                onClick={() => setEditingLimits(true)}
-                style={{
-                  alignSelf: 'flex-end', marginTop: 6, padding: 0, border: 'none', background: 'transparent',
-                  color: 'rgba(255,255,255,0.3)', fontSize: 9, fontFamily: 'monospace', cursor: 'pointer',
-                  textAlign: 'right', textTransform: 'uppercase', letterSpacing: '0.1em',
-                }}
-              >
-                set limits
-              </button>
-            </>
-        }
+        <ConcentricRings stats={stats} limits={limits} usageLimits={usageLimits} />
       </Block>
 
       <Block>
@@ -91,7 +74,7 @@ export function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
                   </span>
                 </div>
                 <div style={{ height: 2, background: 'rgba(255,255,255,0.07)', borderRadius: 1 }}>
-                  <div style={{ height: '100%', width: `${pct * 100}%`, background: '#C15F3C', borderRadius: 1, opacity: 0.65 }} />
+                  <div style={{ height: '100%', width: `${pct * 100}%`, background: ACCENT, borderRadius: 1, opacity: 0.65 }} />
                 </div>
               </div>
             );

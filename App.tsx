@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ClaudeStats, TogglStats } from '@/lib/types';
 import { relTime } from '@/lib/format';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { ClaudePanel } from '@/components/claude/ClaudePanel';
 import { TogglPanel } from '@/components/toggl/TogglPanel';
 
@@ -80,52 +81,63 @@ export default function App() {
       ...({ WebkitAppRegion: 'drag' } as any),
     }}>
 
-      {/* Header */}
-      <div style={{
-        padding: '12px 14px 10px',
-        borderBottom: '1px solid rgba(255,255,255,0.07)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      }}>
-        <div style={{ display: 'flex', gap: 2, ...({ WebkitAppRegion: 'no-drag' } as any) }}>
-          {([
-            { id: 'claude', label: '⚡ Claude' },
-            { id: 'toggl',  label: '⏱ Toggl' },
-          ] as { id: Tab; label: string }[]).map(({ id, label }) => (
-            <button key={id} onClick={() => setTab(id as Tab)} style={{
-              padding: '4px 12px',
-              border: 'none', borderRadius: 7, cursor: 'pointer',
-              background: tab === id ? 'rgba(193,95,60,0.18)' : 'transparent',
-              color: tab === id ? '#C15F3C' : 'rgba(255,255,255,0.35)',
-              fontSize: 11, fontWeight: tab === id ? 600 : 400,
-            }}>
-              {label}
-            </button>
-          ))}
+      <Tabs
+        value={tab}
+        onValueChange={(v) => setTab(v as Tab)}
+        className="flex min-h-0 flex-1 flex-col gap-0"
+      >
+        {/* Header */}
+        <div style={{
+          padding: '1px 14px 1px 14px',
+          borderBottom: '1px solid rgba(255,255,255,0.07)',
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <TabsList
+            className="h-auto flex-1 gap-1 bg-transparent p-0"
+            style={({ WebkitAppRegion: 'no-drag' } as any)}
+          >
+            {([
+              { id: 'claude', label: 'Claude' },
+              { id: 'toggl',  label: 'Toggl' },
+            ] as { id: Tab; label: string }[]).map(({ id, label }) => (
+              <TabsTrigger
+                key={id}
+                value={id}
+                className="relative h-auto flex-1 rounded-none border-0 bg-transparent px-3 pb-2 pt-1 text-[12.5px] font-medium text-white/45 shadow-none outline-none transition-colors after:absolute after:inset-x-0 after:bottom-0 after:h-[3px] after:rounded-full after:bg-primary after:opacity-0 after:transition-opacity hover:text-white/70 focus-visible:border-transparent focus-visible:outline-none focus-visible:ring-0 data-[state=active]:bg-transparent data-[state=active]:font-semibold data-[state=active]:text-accent-bright data-[state=active]:shadow-none data-[state=active]:after:opacity-100"
+              >
+                {label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', fontFamily: 'monospace', flexShrink: 0 }}>
+            {tab === 'claude' && claudeStats ? relTime(claudeStats.lastUpdated) : ''}
+            {tab === 'toggl'  && togglStats  ? relTime(togglStats.lastUpdated)  : ''}
+          </span>
         </div>
-        <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', fontFamily: 'monospace' }}>
-          {tab === 'claude' && claudeStats ? relTime(claudeStats.lastUpdated) : ''}
-          {tab === 'toggl'  && togglStats  ? relTime(togglStats.lastUpdated)  : ''}
-        </span>
-      </div>
 
-      {/* Body */}
-      <div style={{
-        flex: 1, overflow: 'auto',
-        padding: '12px 14px 16px',
-        ...({ WebkitAppRegion: 'no-drag' } as any),
-      }}>
-        <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }`}</style>
+        {/* Body */}
+        <div style={{
+          flex: 1, overflow: 'auto',
+          padding: '12px 14px 16px',
+          ...({ WebkitAppRegion: 'no-drag' } as any),
+        }}>
+          <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }`}</style>
 
-        {tab === 'claude' && <ClaudePanel stats={claudeStats} />}
-        {tab === 'toggl' && tokenLoaded && (
-          <TogglPanel
-            stats={togglStats}
-            token={togglToken}
-            onSetToken={handleSetToken}
-            fetchError={togglFetchError}
-          />
-        )}
-      </div>
+          <TabsContent value="claude" className="mt-0">
+            <ClaudePanel stats={claudeStats} />
+          </TabsContent>
+          <TabsContent value="toggl" className="mt-0">
+            {tokenLoaded && (
+              <TogglPanel
+                stats={togglStats}
+                token={togglToken}
+                onSetToken={handleSetToken}
+                fetchError={togglFetchError}
+              />
+            )}
+          </TabsContent>
+        </div>
+      </Tabs>
     </div>
   );
 }

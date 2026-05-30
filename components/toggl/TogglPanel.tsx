@@ -1,6 +1,7 @@
 import type { TogglStats } from '@/lib/types';
 import { fmtSeconds } from '@/lib/format';
 import { Block, SectionLabel, StatRow } from '@/components/primitives';
+import { Skeleton } from '@/components/ui/skeleton';
 import { TogglTokenInput } from './TogglTokenInput';
 import { SyncReview } from './SyncReview';
 
@@ -14,11 +15,14 @@ export function TogglPanel({
 }) {
   if (!token) return <TogglTokenInput onSave={onSetToken} />;
 
-  if (!stats) return (
-    <div style={{ color: fetchError ? '#f87171' : 'rgba(255,255,255,0.3)', fontSize: 11, fontFamily: 'monospace' }}>
-      {fetchError ?? 'loading…'}
-    </div>
-  );
+  if (!stats) return fetchError
+    ? <div style={{ color: '#f87171', fontSize: 11, fontFamily: 'monospace' }}>{fetchError}</div>
+    : (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <Skeleton className="h-[96px] w-full rounded-[9px]" />
+        <Skeleton className="h-[120px] w-full rounded-[9px]" />
+      </div>
+    );
 
   const maxSec = Math.max(...stats.byProject.map(p => p.seconds), 1);
 

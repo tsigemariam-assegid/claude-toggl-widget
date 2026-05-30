@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { SectionLabel } from '@/components/primitives';
+import { Button } from '@/components/ui/button';
 import { isoToLocalInput, errMsg } from '@/lib/format';
 
 type ReviewPhase = 'idle' | 'loading' | 'review' | 'pushing' | 'done' | 'error';
@@ -55,12 +56,14 @@ export function SyncReview({ token }: { token: string }) {
   }
 
   const btn = (label: string, onClick: () => void, primary = false) => (
-    <button onClick={onClick} style={{
-      padding: '5px 12px', border: 'none', borderRadius: 6, cursor: 'pointer',
-      background: primary ? 'rgba(193,95,60,0.18)' : 'rgba(255,255,255,0.07)',
-      color: primary ? '#C15F3C' : 'rgba(255,255,255,0.55)',
-      fontSize: 10, fontFamily: 'monospace',
-    }}>{label}</button>
+    <Button
+      onClick={onClick}
+      size="xs"
+      className={primary
+        ? 'rounded-md border-0 bg-[rgba(193,95,60,0.18)] px-3 font-mono text-[10px] text-[#C15F3C] shadow-none hover:bg-[rgba(193,95,60,0.28)]'
+        : 'rounded-md border-0 bg-white/[0.07] px-3 font-mono text-[10px] text-white/55 shadow-none hover:bg-white/[0.12]'
+      }
+    >{label}</Button>
   );
 
   if (phase === 'idle')    return <div style={{ marginTop: 4 }}>{btn('review claude sessions →', loadPreview, true)}</div>;

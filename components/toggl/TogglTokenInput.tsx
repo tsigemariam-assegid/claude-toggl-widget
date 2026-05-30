@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { SectionLabel } from '@/components/primitives';
+import { Button } from '@/components/ui/button';
 
 export function TogglTokenInput({ onSave }: { onSave: (t: string) => void }) {
   const [val, setVal] = useState('');
@@ -27,22 +28,13 @@ export function TogglTokenInput({ onSave }: { onSave: (t: string) => void }) {
           marginBottom: 8,
         }}
       />
-      <button
+      <Button
         onClick={() => val.trim() && onSave(val.trim())}
-        style={{
-          width: '100%',
-          padding: '6px 0',
-          background: 'rgba(193,95,60,0.2)',
-          border: '1px solid rgba(193,95,60,0.3)',
-          borderRadius: 7,
-          color: '#C15F3C',
-          fontSize: 11,
-          fontFamily: 'monospace',
-          cursor: 'pointer',
-        }}
+        size="sm"
+        className="w-full rounded-[7px] border border-[rgba(193,95,60,0.3)] bg-[rgba(193,95,60,0.2)] font-mono text-[11px] text-[#C15F3C] shadow-none hover:bg-[rgba(193,95,60,0.32)]"
       >
         Save token
-      </button>
+      </Button>
     </div>
   );
 }
