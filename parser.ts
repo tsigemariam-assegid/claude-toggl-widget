@@ -59,6 +59,8 @@ export interface ClaudeStats {
   byModel: { model: string; tokens: number; cost: number }[];
   activityByHour: number[];   // index = hour 0-23, value = message count (today only)
   activityByDay: Record<string, number>;  // "YYYY-MM-DD" → message count
+  dailyValue: Record<string, { cost: number; tokens: number; cacheSavings: number }>;  // "YYYY-MM-DD" → all-time value series
+  cacheSavingsTotal: number;  // all-time $ saved by cache reads
   lastUpdated: string;
 }
 
@@ -70,6 +72,12 @@ function calcCost(model: string, usage: Record<string, number>): number {
     ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * p.cacheCreate +
     ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * p.cacheRead
   );
+}
+
+// $ saved by cache reads vs paying full input price, per model
+function calcCacheSavings(model: string, cacheReadTokens: number): number {
+  const p = PRICING[model] ?? PRICING['default'];
+  return (cacheReadTokens / 1_000_000) * (p.input - p.cacheRead);
 }
 
 async function parseFile(filePath: string): Promise<UsageRecord[]> {
@@ -141,6 +149,68 @@ function sumRecords(records: UsageRecord[]) {
   };
 }
 
+const IDLE_GAP_MS = 25 * 60 * 1000; // gap that splits a session into separate work blocks
+
+export interface WorkBlock {
+  blockKey: string;        // "sessionId::blockStart" — dedup key for sync
+  sessionId: string;
+  project: string;         // path.basename(cwd) of the last record in the block
+  start: string;           // ISO — first record
+  stop: string;            // ISO — last record
+  durationSeconds: number;
+}
+
+export async function getClaudeWorkBlocks(days: number): Promise<WorkBlock[]> {
+  if (!fs.existsSync(CLAUDE_DIR)) return [];
+
+  const files = walkDir(CLAUDE_DIR);
+  const allRecords: UsageRecord[] = [];
+  for (const file of files) {
+    allRecords.push(...await parseFile(file));
+  }
+  allRecords.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  const cutoff          = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const completedBefore = new Date(Date.now() - IDLE_GAP_MS).toISOString();
+  const recent = allRecords.filter(r => r.timestamp >= cutoff);
+
+  const bySession = groupBy(recent, r => r.sessionId);
+  const blocks: WorkBlock[] = [];
+
+  for (const [sessionId, recs] of Object.entries(bySession)) {
+    let blockStart = recs[0];
+    let blockPrev  = recs[0];
+
+    const closeBlock = (blockEnd: UsageRecord) => {
+      const durationSeconds = Math.round(
+        (new Date(blockEnd.timestamp).getTime() - new Date(blockStart.timestamp).getTime()) / 1000
+      );
+      if (durationSeconds >= 60 && blockEnd.timestamp < completedBefore) {
+        blocks.push({
+          blockKey: `${sessionId}::${blockStart.timestamp}`,
+          sessionId,
+          project: blockEnd.project,
+          start: blockStart.timestamp,
+          stop: blockEnd.timestamp,
+          durationSeconds,
+        });
+      }
+    };
+
+    for (let i = 1; i < recs.length; i++) {
+      const gap = new Date(recs[i].timestamp).getTime() - new Date(blockPrev.timestamp).getTime();
+      if (gap > IDLE_GAP_MS) {
+        closeBlock(blockPrev);
+        blockStart = recs[i];
+      }
+      blockPrev = recs[i];
+    }
+    closeBlock(blockPrev);
+  }
+
+  return blocks;
+}
+
 export async function getClaudeStats(): Promise<ClaudeStats> {
   if (!fs.existsSync(CLAUDE_DIR)) {
     throw new Error(`Claude projects dir not found: ${CLAUDE_DIR}`);
@@ -187,11 +257,20 @@ export async function getClaudeStats(): Promise<ClaudeStats> {
     activityByHour[hour]++;
   }
 
-  // Activity by day (all-time, for heatmap)
+  // Activity by day (all-time, for heatmap) + per-day value series
   const activityByDay: Record<string, number> = {};
+  const dailyValue: Record<string, { cost: number; tokens: number; cacheSavings: number }> = {};
+  let cacheSavingsTotal = 0;
   for (const r of allRecords) {
     const day = r.timestamp.slice(0, 10);
     activityByDay[day] = (activityByDay[day] ?? 0) + 1;
+
+    const savings = calcCacheSavings(r.model, r.cacheReadTokens);
+    cacheSavingsTotal += savings;
+    const dv = (dailyValue[day] ??= { cost: 0, tokens: 0, cacheSavings: 0 });
+    dv.cost += r.cost;
+    dv.tokens += r.inputTokens + r.outputTokens;
+    dv.cacheSavings += savings;
   }
 
   // Current session: most recent sessionId
@@ -270,6 +349,8 @@ export async function getClaudeStats(): Promise<ClaudeStats> {
     byModel,
     activityByHour,
     activityByDay,
+    dailyValue,
+    cacheSavingsTotal,
     lastUpdated: new Date().toISOString(),
   };
 }

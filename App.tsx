@@ -35,6 +35,8 @@ interface ClaudeStats {
   byModel: { model: string; tokens: number; cost: number }[];
   activityByHour: number[];
   activityByDay: Record<string, number>;
+  dailyValue: Record<string, { cost: number; tokens: number; cacheSavings: number }>;
+  cacheSavingsTotal: number;
   lastUpdated: string;
 }
 
@@ -62,12 +64,13 @@ interface UsageLimitsAPI {
 declare global {
   interface Window {
     claudeAPI?: {
-      getStats:        () => Promise<ClaudeStats>;
-      getUsageLimits:  () => Promise<UsageLimitsAPI>;
-      getTogglStats:   (token: string) => Promise<TogglStats>;
-      onStatsUpdate:   (cb: (s: ClaudeStats) => void) => () => void;
-      getTogglToken:   () => Promise<string | null>;
-      saveTogglToken:  (token: string) => Promise<void>;
+      getStats:          () => Promise<ClaudeStats>;
+      getUsageLimits:    () => Promise<UsageLimitsAPI>;
+      getTogglStats:     (token: string) => Promise<TogglStats>;
+      onStatsUpdate:     (cb: (s: ClaudeStats) => void) => () => void;
+      getTogglToken:     () => Promise<string | null>;
+      saveTogglToken:    (token: string) => Promise<void>;
+      syncClaudeToToggl: (token: string) => Promise<{ synced: number; lastSyncAt: string }>;
     };
   }
 }
@@ -78,6 +81,25 @@ function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+function fmtUSD(n: number): string {
+  if (n >= 10_000) return `$${(n / 1000).toFixed(1)}k`;
+  if (n >= 100)    return `$${Math.round(n).toLocaleString()}`;
+  return `$${n.toFixed(2)}`;
+}
+
+// ISO "YYYY-MM-DD" of the current billing cycle's start, given the renewal day-of-month.
+// If today is before the renewal day, the cycle started last month.
+function cycleStart(day: number, now = new Date()): string {
+  const d = Math.min(Math.max(Math.floor(day) || 1, 1), 28);
+  const start = new Date(now.getFullYear(), now.getMonth(), d);
+  if (now.getDate() < d) start.setMonth(start.getMonth() - 1);
+  // local-date → ISO date string without UTC shift
+  const y = start.getFullYear();
+  const m = String(start.getMonth() + 1).padStart(2, '0');
+  const dd = String(start.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
 }
 
 function fmtCost(n: number): string {
@@ -105,6 +127,8 @@ interface ClaudeLimits {
   session5h: number;   // tokens per 5-hour window
   weekly: number;      // tokens per 7 days
   weeklyDonnet: number; // sonnet tokens per 7 days
+  planPrice: number;    // $/month — ROI denominator
+  cycleStartDay: number; // billing-cycle renewal day of month (1–28)
 }
 
 // Defaults tuned for Claude Max 5x plan (~5× Pro baseline)
@@ -112,6 +136,8 @@ const DEFAULT_LIMITS: ClaudeLimits = {
   session5h:    2_500_000,
   weekly:      15_000_000,
   weeklyDonnet: 10_000_000,
+  planPrice:    100,
+  cycleStartDay: 1,
 };
 
 const LIMITS_KEY = 'claude-widget-limits';
@@ -390,6 +416,10 @@ function LimitsEditor({ limits, onSave, onCancel }: { limits: ClaudeLimits; onSa
       {field('session5h', 'Session (5hr limit)')}
       {field('weekly', 'Weekly limit')}
       {field('weeklyDonnet', 'Weekly Sonnet limit')}
+      <div style={{ height: 1, background: 'rgba(255,255,255,0.07)', margin: '4px 0 8px' }} />
+      <SectionLabel>billing cycle</SectionLabel>
+      {field('planPrice', 'Plan price ($/mo)')}
+      {field('cycleStartDay', 'Cycle start day (1–28)')}
       <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
         <button
           onClick={() => onSave(vals)}
@@ -528,6 +558,113 @@ function ActivityHeatmap({ activityByDay }: { activityByDay: Record<string, numb
   );
 }
 
+// ── Value / ROI ────────────────────────────────────────────────────────────────
+
+// Next renewal date label, e.g. "Jun 1"
+function fmtCycleReset(day: number): string {
+  const now = new Date();
+  const d = Math.min(Math.max(Math.floor(day) || 1, 1), 28);
+  const next = new Date(now.getFullYear(), now.getMonth(), d);
+  if (now.getDate() >= d) next.setMonth(next.getMonth() + 1);
+  return next.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+}
+
+// Cumulative value points + totals for the current cycle (days >= startISO)
+function cycleSeries(dailyValue: ClaudeStats['dailyValue'], startISO: string) {
+  const days = Object.keys(dailyValue).filter(d => d >= startISO).sort();
+  let cum = 0, cost = 0, savings = 0;
+  const points = days.map(d => {
+    const dv = dailyValue[d];
+    cost += dv.cost; savings += dv.cacheSavings; cum += dv.cost;
+    return { date: d, cum };
+  });
+  return { points, cost, savings };
+}
+
+const ACCENT = '#C15F3C';
+const PRO_PRICE = 20; // Claude Pro plan $/mo — comparison baseline
+
+function ValueCard({ cycleValue, allTimeValue, price, cycleStartDay }: {
+  cycleValue: number; allTimeValue: number; price: number; cycleStartDay: number;
+}) {
+  const mult = price > 0 ? cycleValue / price : 0;
+  // Auto-scale the gauge with headroom so a healthy multiplier visibly overshoots
+  // the 1× break-even tick (a fixed 0–10× scale would make a real ~1.6× look empty).
+  const BAR_MAX = Math.max(2, Math.ceil(mult * 1.2));
+  const fillPct = Math.min(mult / BAR_MAX, 1) * 100;
+  const tickPct = (1 / BAR_MAX) * 100;      // break-even (1×) marker
+  const over = mult >= 1;
+
+  return (
+    <Block>
+      <SectionLabel>value extracted · this cycle</SectionLabel>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 32, fontWeight: 700, color: ACCENT, fontFamily: 'monospace', lineHeight: 1 }}>
+          {mult >= 100 ? Math.round(mult) : mult.toFixed(1)}×
+        </span>
+        <span style={{ fontSize: 13, color: '#f1f5f9', fontFamily: 'monospace', fontWeight: 600 }}>
+          {fmtUSD(cycleValue)}
+        </span>
+      </div>
+      {/* Unbounded gauge: fill overshoots the 1× break-even tick — higher is better */}
+      <div style={{ position: 'relative', height: 5, background: 'rgba(255,255,255,0.07)', borderRadius: 3, marginTop: 8, marginBottom: 6, overflow: 'visible' }}>
+        <div style={{ height: '100%', width: `${fillPct}%`, background: ACCENT, borderRadius: 3, opacity: over ? 0.9 : 0.55 }} />
+        <div title="break-even (1×)" style={{ position: 'absolute', top: -2, bottom: -2, left: `${tickPct}%`, width: 1, background: 'rgba(255,255,255,0.5)' }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>
+        <span>{fmtUSD(price)} plan · resets {fmtCycleReset(cycleStartDay)}</span>
+        <span>{fmtUSD(allTimeValue)} all-time</span>
+      </div>
+      {/* How much more value than a $20 Pro plan would give this cycle */}
+      <div style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace' }}>
+          vs Pro plan ({fmtUSD(PRO_PRICE)}/mo)
+        </span>
+        <span style={{ fontSize: 11, color: ACCENT, fontFamily: 'monospace', fontWeight: 600 }}>
+          {(cycleValue / PRO_PRICE).toFixed(1)}× · {fmtUSD(cycleValue - PRO_PRICE)} more
+        </span>
+      </div>
+    </Block>
+  );
+}
+
+function BurnUp({ points, price }: { points: { date: string; cum: number }[]; price: number }) {
+  if (points.length === 0) {
+    return (
+      <Block>
+        <SectionLabel>value burn-up · this cycle</SectionLabel>
+        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', padding: '6px 0' }}>no usage this cycle yet</div>
+      </Block>
+    );
+  }
+  const W = 320, H = 64, PAD = 5;
+  const maxCum = Math.max(points[points.length - 1].cum, price, 1);
+  const n = points.length;
+  const x = (i: number) => n === 1 ? W / 2 : PAD + (i / (n - 1)) * (W - 2 * PAD);
+  const y = (v: number) => H - PAD - (v / maxCum) * (H - 2 * PAD);
+  const line = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.cum).toFixed(1)}`).join(' ');
+  const area = `${line} L ${x(n - 1).toFixed(1)} ${(H - PAD).toFixed(1)} L ${x(0).toFixed(1)} ${(H - PAD).toFixed(1)} Z`;
+  const breakY = y(price);
+  const showBreak = price <= maxCum;
+
+  return (
+    <Block>
+      <SectionLabel>value burn-up · this cycle</SectionLabel>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none">
+        {showBreak && (
+          <>
+            <line x1={0} y1={breakY} x2={W} y2={breakY} stroke="rgba(255,255,255,0.25)" strokeWidth={1} strokeDasharray="3 3" />
+            <text x={2} y={breakY - 3} fill="rgba(255,255,255,0.35)" fontSize={8} fontFamily="monospace">break-even</text>
+          </>
+        )}
+        <path d={area} fill={ACCENT} fillOpacity={0.15} />
+        <path d={line} fill="none" stroke={ACCENT} strokeWidth={1.8} strokeLinejoin="round" strokeLinecap="round" />
+        <circle cx={x(n - 1)} cy={y(points[n - 1].cum)} r={2.5} fill={ACCENT} />
+      </svg>
+    </Block>
+  );
+}
+
 // ── Claude Panel ───────────────────────────────────────────────────────────────
 
 function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
@@ -553,8 +690,24 @@ function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
     setEditingLimits(false);
   }
 
+  const { points, cost: cycleValue, savings: cycleSavings } = cycleSeries(stats.dailyValue, cycleStart(limits.cycleStartDay));
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <ValueCard
+        cycleValue={cycleValue}
+        allTimeValue={stats.total.cost}
+        price={limits.planPrice}
+        cycleStartDay={limits.cycleStartDay}
+      />
+
+      <BurnUp points={points} price={limits.planPrice} />
+
+      <Block>
+        <StatRow label="💸 saved by caching · cycle" value={fmtUSD(cycleSavings)} />
+        <StatRow label="saved by caching · all-time" value={fmtUSD(stats.cacheSavingsTotal)} />
+      </Block>
+
       <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <ActivityHeatmap activityByDay={stats.activityByDay} />
@@ -603,17 +756,26 @@ function ClaudePanel({ stats }: { stats: ClaudeStats | null }) {
 
 // ── Toggl Panel ────────────────────────────────────────────────────────────────
 
+type SyncStatus = 'idle' | 'syncing' | 'done' | 'error';
+
 function TogglPanel({
-  stats, hasToken, onSetToken,
+  stats, hasToken, onSetToken, onSync, syncStatus, lastSyncResult, syncError, fetchError,
 }: {
   stats: TogglStats | null;
   hasToken: boolean;
   onSetToken: (t: string) => void;
+  onSync: () => void;
+  syncStatus: SyncStatus;
+  lastSyncResult: { synced: number; at: string } | null;
+  syncError: string | null;
+  fetchError: string | null;
 }) {
   if (!hasToken) return <TogglTokenInput onSave={onSetToken} />;
 
   if (!stats) return (
-    <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 11, fontFamily: 'monospace' }}>loading…</div>
+    <div style={{ color: fetchError ? '#f87171' : 'rgba(255,255,255,0.3)', fontSize: 11, fontFamily: 'monospace' }}>
+      {fetchError ?? 'loading…'}
+    </div>
   );
 
   const maxSec = Math.max(...stats.byProject.map(p => p.seconds), 1);
@@ -669,6 +831,33 @@ function TogglPanel({
           })}
         </Block>
       )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+        <button
+          onClick={onSync}
+          disabled={syncStatus === 'syncing'}
+          style={{
+            padding: '5px 12px',
+            border: 'none', borderRadius: 6,
+            cursor: syncStatus === 'syncing' ? 'default' : 'pointer',
+            background: 'rgba(193,95,60,0.18)',
+            color: syncStatus === 'syncing' ? 'rgba(255,255,255,0.3)' : '#C15F3C',
+            fontSize: 10, fontFamily: 'monospace',
+          }}
+        >
+          {syncStatus === 'syncing' ? 'syncing…' : 'sync claude → toggl'}
+        </button>
+        {syncStatus === 'done' && lastSyncResult && (
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>
+            {lastSyncResult.synced > 0 ? `+${lastSyncResult.synced} entr${lastSyncResult.synced === 1 ? 'y' : 'ies'}` : 'up to date'}
+          </span>
+        )}
+        {syncStatus === 'error' && syncError && (
+          <span style={{ fontSize: 9, color: '#f87171', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {syncError}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -680,9 +869,13 @@ type Tab = 'claude' | 'toggl';
 export default function App() {
   const [tab, setTab]                 = useState<Tab>('claude');
   const [claudeStats, setClaudeStats] = useState<ClaudeStats | null>(null);
-  const [togglStats, setTogglStats]   = useState<TogglStats | null>(null);
-  const [togglToken, setTogglToken]   = useState<string | null>(null);
-  const [tokenLoaded, setTokenLoaded] = useState(false);
+  const [togglStats, setTogglStats]           = useState<TogglStats | null>(null);
+  const [togglToken, setTogglToken]           = useState<string | null>(null);
+  const [tokenLoaded, setTokenLoaded]         = useState(false);
+  const [togglFetchError, setTogglFetchError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus]           = useState<SyncStatus>('idle');
+  const [lastSyncResult, setLastSyncResult]   = useState<{ synced: number; at: string } | null>(null);
+  const [syncError, setSyncError]             = useState<string | null>(null);
 
   useEffect(() => {
     if (!window.claudeAPI) return;
@@ -701,16 +894,32 @@ export default function App() {
 
   useEffect(() => {
     if (!togglToken || !window.claudeAPI) return;
-    window.claudeAPI.getTogglStats(togglToken).then(setTogglStats);
-    const id = setInterval(() => {
-      window.claudeAPI!.getTogglStats(togglToken).then(setTogglStats);
-    }, 60_000);
+    const fetchStats = () =>
+      window.claudeAPI!.getTogglStats(togglToken)
+        .then(s => { setTogglStats(s); setTogglFetchError(null); })
+        .catch(err => setTogglFetchError(err instanceof Error ? err.message : 'Toggl error'));
+    fetchStats();
+    const id = setInterval(fetchStats, 3 * 60_000);
     return () => clearInterval(id);
   }, [togglToken]);
 
   async function handleSetToken(token: string) {
     await window.claudeAPI.saveTogglToken(token);
     setTogglToken(token);
+  }
+
+  async function handleSync() {
+    if (!togglToken || !window.claudeAPI) return;
+    setSyncStatus('syncing');
+    setSyncError(null);
+    try {
+      const result = await window.claudeAPI.syncClaudeToToggl(togglToken);
+      setLastSyncResult({ synced: result.synced, at: result.lastSyncAt });
+      setSyncStatus('done');
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : 'sync failed');
+      setSyncStatus('error');
+    }
   }
 
   if (!window.claudeAPI) return (
@@ -780,6 +989,11 @@ export default function App() {
             stats={togglStats}
             hasToken={!!togglToken}
             onSetToken={handleSetToken}
+            onSync={handleSync}
+            syncStatus={syncStatus}
+            lastSyncResult={lastSyncResult}
+            syncError={syncError}
+            fetchError={togglFetchError}
           />
         )}
       </div>

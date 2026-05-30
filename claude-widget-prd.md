@@ -37,7 +37,7 @@ The target user is a developer or freelancer who uses Claude Code daily and trac
 - Correlation or joined analysis between Claude and Toggl data.
 - Historical charts or trend analysis beyond the current week.
 - Cloud sync or multi-device support.
-- Toggl write operations (starting/stopping timers).
+- Toggl start/stop timer control.
 
 ---
 
@@ -63,7 +63,9 @@ The parser watches `~/.claude/projects/` with `fs.watch` for reactive updates. F
 
 ### 4.2 Toggl
 
-Toggl Track API v9. Authenticated with a personal API token (HTTP Basic, stored encrypted). Polled every 60 seconds.
+Toggl Track API v9. Authenticated with a personal API token stored encrypted via `safeStorage` (macOS Keychain). Entered once via the in-app UI and persists across restarts. Polled every 3 minutes to stay within Toggl's free-tier rate limit (30 req/hr; exceeding it returns 402). The last successful response is cached to disk so the UI stays populated during rate-limit windows.
+
+**Read endpoints:**
 
 | Field | Endpoint | Used for |
 |---|---|---|
@@ -72,6 +74,17 @@ Toggl Track API v9. Authenticated with a personal API token (HTTP Basic, stored 
 | `duration < 0` | `GET /me/time_entries` | Running timer detection |
 | `description` | `GET /me/time_entries` | Current entry label |
 | `name` / `color` | `GET /me/projects` | Project display |
+
+**Write endpoints (Claude→Toggl sync):**
+
+| Endpoint | Used for |
+|---|---|
+| `GET /me` | Resolve default workspace ID |
+| `GET /workspaces/{wid}/projects` | Find existing "Side Project" |
+| `POST /workspaces/{wid}/projects` | Create "Side Project" if absent |
+| `GET /workspaces/{wid}/tags` | Find existing "coding" tag |
+| `POST /workspaces/{wid}/tags` | Create "coding" tag if absent |
+| `POST /workspaces/{wid}/time_entries` | Create one entry per work block |
 
 ---
 
@@ -103,7 +116,7 @@ Toggl Track API v9. Authenticated with a personal API token (HTTP Basic, stored 
 - Today: total hours, entry count.
 - This week: total hours, entry count.
 - Project breakdown with Toggl project colors (top 5, week view).
-- API token input + secure save flow on first launch.
+- "sync claude → toggl" button — pushes completed Claude work blocks as Toggl entries (project: "Side Project", tag: "coding", description: Claude project folder name). Synced entries are deduplicated across runs.
 
 ---
 
@@ -112,10 +125,10 @@ Toggl Track API v9. Authenticated with a personal API token (HTTP Basic, stored 
 | Layer | Technology | Responsibility |
 |---|---|---|
 | Shell | Electron 30 | Tray, BrowserWindow, IPC, file watcher |
-| Main process | Node.js + TypeScript | JSONL parsing, Toggl fetching, token storage |
+| Main process | Node.js + TypeScript | JSONL parsing, Toggl fetching, sync logic |
 | Renderer | React 18 + TypeScript | UI, state management |
 | Bundler | electron-vite + Vite | Dev server, production build |
-| Security | Electron safeStorage | Toggl token encrypted via macOS Keychain |
+| Security | Electron `safeStorage` | Toggl token encrypted via macOS Keychain |
 
 **IPC Handlers**
 
@@ -123,26 +136,25 @@ Toggl Track API v9. Authenticated with a personal API token (HTTP Basic, stored 
 |---|---|---|
 | `get-stats` | renderer → main | Fetch parsed Claude Code stats |
 | `stats-update` | main → renderer | Push stats on file change |
-| `get-toggl-stats` | renderer → main | Fetch Toggl data for a given token |
+| `get-usage-limits` | renderer → main | Fetch Anthropic quota utilization |
+| `get-toggl-stats` | renderer → main | Fetch Toggl data (falls back to disk cache on 402) |
 | `get-toggl-token` | renderer → main | Read encrypted token from disk |
 | `save-toggl-token` | renderer → main | Encrypt and persist token |
+| `sync-claude-to-toggl` | renderer → main | Push completed Claude work blocks to Toggl |
 
 ---
 
 ## 7. File Structure
 
 ```
-claude-widget/
-  electron/
-    main.ts        — Tray, window, IPC, file watcher
-    parser.ts      — JSONL parser for ~/.claude/projects/
-    toggl.ts       — Toggl API v9 client
-    preload.ts     — Context bridge (IPC surface for renderer)
-  src/
-    App.tsx        — Two-tab UI (Claude + Toggl panels)
-    main.tsx       — React entry point
-  assets/
-    icon.png       — 22×22px monochrome menu bar icon
+claude-widget/       (flat layout — no src/ or electron/ subdirectory)
+  main.ts            — Tray, window, IPC, file watcher, sync logic
+  parser.ts          — JSONL parser + work-block segmentation
+  toggl.ts           — Toggl API v9 client (read + write)
+  preload.ts         — Context bridge (IPC surface for renderer)
+  App.tsx            — Two-tab UI (Claude + Toggl panels)
+  main.tsx           — React entry point
+  assets/            — Tray icon PNGs
   index.html
   electron.vite.config.ts
   package.json
@@ -163,7 +175,8 @@ claude-widget/
 | Toggl today + week hours | ✓ | |
 | Toggl project breakdown | ✓ | |
 | Running timer indicator | ✓ | |
-| Secure token storage | ✓ | |
+| Secure token storage (macOS Keychain) | ✓ | |
+| Claude→Toggl session sync | ✓ | |
 | Historical charts (30d, all time) | | ✓ |
 | Cache efficiency metric | | ✓ |
 | Toggl start/stop timer | | ✓ |
@@ -178,7 +191,7 @@ claude-widget/
 ## 9. Open Questions
 
 - **Pricing accuracy** — model prices in `parser.ts` are estimates. Verify against anthropic.com/pricing before relying on cost figures.
-- **CORS in production** — Toggl fetch runs in the renderer. If blocked in the packaged app, move the call to the main process.
-- **Icon asset** — a 22×22px monochrome PNG is needed for the tray. Without it the tray shows blank (title label still works).
+- **Toggl rate limits** — free tier allows 30 req/hr per user. The 3-minute poll uses ~20/hr; a single sync adds ~4 + N requests. Heavy sync usage on the free tier may still hit the cap. Toggl returns 402 (not 429) when the limit is exceeded; the cache prevents UI disruption but data will be stale until the window resets.
+- **Work block idle gap** — currently 25 minutes (`IDLE_GAP_MS` in `parser.ts`). Gaps shorter than this within a session are treated as continuous work. Adjust if your workflow has different break patterns.
 - **Week definition** — rolling 7 days anchored to `sevenDay.resetsAt` from the Anthropic API when available; otherwise `now - 7d`. Calendar-week alignment is not planned.
-- **Toggl workspace** — current implementation fetches from the default workspace. Multi-workspace users may need a selector.
+- **Toggl workspace** — sync targets the default workspace (`GET /me → default_workspace_id`). Multi-workspace users may need a selector.

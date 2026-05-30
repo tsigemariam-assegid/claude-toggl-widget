@@ -21,4 +21,6 @@ contextBridge.exposeInMainWorld('claudeAPI', {
     ipcRenderer.invoke('get-toggl-token'),
   saveTogglToken: (token: string): Promise<void> =>
     ipcRenderer.invoke('save-toggl-token', token),
+  syncClaudeToToggl: (token: string): Promise<{ synced: number; lastSyncAt: string }> =>
+    ipcRenderer.invoke('sync-claude-to-toggl', token),
 });

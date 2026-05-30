@@ -158,4 +158,74 @@ export async function getTogglStats(apiToken: string): Promise<TogglStats> {
   };
 }
 
+interface TogglTag {
+  id: number;
+  name: string;
+  workspace_id: number;
+}
+
+async function fetchTogglPost<T>(apiToken: string, urlPath: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE_URL}${urlPath}`, {
+    method: 'POST',
+    headers: {
+      Authorization: authHeader(apiToken),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    if (res.status === 403) throw new Error('Invalid Toggl API token');
+    throw new Error(`Toggl API error: ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export async function getWorkspaceId(apiToken: string): Promise<number> {
+  const me = await fetchToggl<{ default_workspace_id: number }>(apiToken, '/me');
+  return me.default_workspace_id;
+}
+
+export async function getOrCreateProject(apiToken: string, workspaceId: number, name: string): Promise<number> {
+  const projects = (await fetchToggl<TogglProject[] | null>(apiToken, `/workspaces/${workspaceId}/projects`)) ?? [];
+  const existing = projects.find(p => p.name.toLowerCase() === name.toLowerCase());
+  if (existing) return existing.id;
+  const created = await fetchTogglPost<TogglProject>(apiToken, `/workspaces/${workspaceId}/projects`, {
+    name,
+    active: true,
+    is_private: true,
+  });
+  return created.id;
+}
+
+export async function getOrCreateTag(apiToken: string, workspaceId: number, name: string): Promise<number> {
+  const tags = (await fetchToggl<TogglTag[] | null>(apiToken, `/workspaces/${workspaceId}/tags`)) ?? [];
+  const existing = tags.find(t => t.name.toLowerCase() === name.toLowerCase());
+  if (existing) return existing.id;
+  const created = await fetchTogglPost<TogglTag>(apiToken, `/workspaces/${workspaceId}/tags`, { name });
+  return created.id;
+}
+
+export async function createTimeEntry(
+  apiToken: string,
+  workspaceId: number,
+  projectId: number,
+  tagId: number,
+  description: string,
+  start: string,
+  stop: string,
+): Promise<number> {
+  const duration = Math.round((new Date(stop).getTime() - new Date(start).getTime()) / 1000);
+  const entry = await fetchTogglPost<TogglEntry>(apiToken, `/workspaces/${workspaceId}/time_entries`, {
+    created_with: 'claude-widget',
+    description,
+    duration,
+    project_id: projectId,
+    start,
+    stop,
+    tag_ids: [tagId],
+    workspace_id: workspaceId,
+  });
+  return entry.id;
+}
+
 export { formatSeconds };

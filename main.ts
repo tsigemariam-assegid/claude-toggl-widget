@@ -12,8 +12,9 @@ import fs from 'fs';
 import os from 'os';
 import { execFileSync } from 'child_process';
 import https from 'https';
-import { getClaudeStats } from './parser';
-import { getTogglStats } from './toggl';
+import { getClaudeStats, getClaudeWorkBlocks } from './parser';
+import { getTogglStats, getWorkspaceId, getOrCreateProject, getOrCreateTag, createTimeEntry } from './toggl';
+import type { TogglStats } from './toggl';
 
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
@@ -24,6 +25,46 @@ const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
 
 function tokenPath(): string {
   return path.join(app.getPath('userData'), 'toggl-token.enc');
+}
+
+function togglCachePath(): string {
+  return path.join(app.getPath('userData'), 'toggl-cache.json');
+}
+function loadTogglCache(): TogglStats | null {
+  try {
+    const p = togglCachePath();
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch { return null; }
+}
+function saveTogglCache(stats: TogglStats): void {
+  try { fs.writeFileSync(togglCachePath(), JSON.stringify(stats)); } catch {}
+}
+
+interface SyncState {
+  syncedBlocks: Record<string, { togglEntryId: number; syncedAt: string }>;
+  cachedWorkspaceId: number | null;
+  cachedProjectId: number | null;
+  cachedTagId: number | null;
+  lastSyncAt: string | null;
+}
+
+function syncStatePath(): string {
+  return path.join(app.getPath('userData'), 'claude-toggl-sync.json');
+}
+
+function loadSyncState(): SyncState {
+  try {
+    const p = syncStatePath();
+    if (!fs.existsSync(p)) return { syncedBlocks: {}, cachedWorkspaceId: null, cachedProjectId: null, cachedTagId: null, lastSyncAt: null };
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return { syncedBlocks: {}, cachedWorkspaceId: null, cachedProjectId: null, cachedTagId: null, lastSyncAt: null };
+  }
+}
+
+function saveSyncState(state: SyncState): void {
+  fs.writeFileSync(syncStatePath(), JSON.stringify(state, null, 2));
 }
 
 function createWindow(): BrowserWindow {
@@ -121,6 +162,36 @@ export interface UsageLimits {
   sevenDaySonnet: { utilization: number; resetsAt: string } | null;
 }
 
+function usageCachePath(): string {
+  return path.join(app.getPath('userData'), 'usage-limits-cache.json');
+}
+function loadUsageCache(): UsageLimits | null {
+  try {
+    const p = usageCachePath();
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch { return null; }
+}
+function saveUsageCache(limits: UsageLimits): void {
+  try { fs.writeFileSync(usageCachePath(), JSON.stringify(limits)); } catch {}
+}
+
+// Fetch fresh limits and, only if they carry real data, update the in-memory
+// cache and persist to disk. A token-less or failed fetch leaves the last
+// known-good value untouched so the UI never regresses to parser fallbacks.
+async function refreshUsageLimits(): Promise<UsageLimits | null> {
+  try {
+    const fresh = await fetchUsageLimits();
+    if (fresh.fiveHour || fresh.sevenDay || fresh.sevenDaySonnet) {
+      cachedUsageLimits = fresh;
+      saveUsageCache(fresh);
+    }
+  } catch {
+    // keep existing cachedUsageLimits
+  }
+  return cachedUsageLimits;
+}
+
 function readClaudeOAuthToken(): string | null {
   try {
     const raw = execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { timeout: 3000 }).toString().trim();
@@ -195,14 +266,28 @@ app.whenReady().then(async () => {
   // Claude IPC
   ipcMain.handle('get-stats', () => getClaudeStats());
   ipcMain.handle('get-usage-limits', async () => {
-    cachedUsageLimits = await fetchUsageLimits();
-    return cachedUsageLimits;
+    // If we already have a value (seeded from disk at startup), return it
+    // immediately and refresh in the background so the UI never flashes wrong
+    // parser-fallback numbers. Only block on the network when we have nothing.
+    if (cachedUsageLimits) {
+      refreshUsageLimits();
+      return cachedUsageLimits;
+    }
+    return refreshUsageLimits();
   });
 
   // Toggl IPC
-  ipcMain.handle('get-toggl-stats', (_event, token: string) =>
-    getTogglStats(token)
-  );
+  ipcMain.handle('get-toggl-stats', async (_event, token: string) => {
+    try {
+      const stats = await getTogglStats(token);
+      saveTogglCache(stats);
+      return stats;
+    } catch (err) {
+      const cached = loadTogglCache();
+      if (cached) return cached;
+      throw err;
+    }
+  });
 
   ipcMain.handle('get-toggl-token', () => {
     try {
@@ -218,11 +303,51 @@ app.whenReady().then(async () => {
     fs.writeFileSync(tokenPath(), encrypted);
   });
 
-  // Seed limits cache before first stats refresh so window anchors are available immediately
-  cachedUsageLimits = await fetchUsageLimits().catch(() => null);
-  setInterval(async () => {
-    cachedUsageLimits = await fetchUsageLimits().catch(() => cachedUsageLimits);
-  }, 5 * 60 * 1000);
+  ipcMain.handle('sync-claude-to-toggl', async (_event, token: string) => {
+    const blocks = await getClaudeWorkBlocks(7);
+    const state  = loadSyncState();
+    const unsynced = blocks.filter(b => !state.syncedBlocks[b.blockKey]);
+
+    if (unsynced.length === 0) {
+      state.lastSyncAt = new Date().toISOString();
+      saveSyncState(state);
+      return { synced: 0, lastSyncAt: state.lastSyncAt };
+    }
+
+    if (!state.cachedWorkspaceId) {
+      state.cachedWorkspaceId = await getWorkspaceId(token);
+    }
+    const wid = state.cachedWorkspaceId!;
+
+    if (!state.cachedProjectId) {
+      state.cachedProjectId = await getOrCreateProject(token, wid, 'Side Project');
+    }
+    const projectId = state.cachedProjectId!;
+
+    if (!state.cachedTagId) {
+      state.cachedTagId = await getOrCreateTag(token, wid, 'coding');
+    }
+    const tagId = state.cachedTagId!;
+
+    let synced = 0;
+    for (const block of unsynced) {
+      const entryId = await createTimeEntry(token, wid, projectId, tagId, block.project, block.start, block.stop);
+      state.syncedBlocks[block.blockKey] = { togglEntryId: entryId, syncedAt: new Date().toISOString() };
+      synced++;
+      saveSyncState(state); // save after each entry so partial progress survives errors
+    }
+
+    state.lastSyncAt = new Date().toISOString();
+    saveSyncState(state);
+    return { synced, lastSyncAt: state.lastSyncAt };
+  });
+
+  // Seed from disk instantly so a fresh restart never shows null limits (which
+  // would make the renderer fall back to wrong parser-derived values), then
+  // refresh from the network in the background.
+  cachedUsageLimits = loadUsageCache();
+  refreshUsageLimits();
+  setInterval(refreshUsageLimits, 5 * 60 * 1000);
 
   await refreshClaudeStats();
   setupFileWatcher();

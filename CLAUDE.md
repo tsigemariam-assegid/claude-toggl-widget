@@ -39,9 +39,9 @@ This is a macOS menu bar app built with Electron 30 + React 18 + TypeScript, bun
 **Data flow:**
 1. `parser.ts` walks `~/.claude/projects/**/*.jsonl`, reads `assistant`-type JSONL entries, computes token counts and cost from `message.usage`, and returns a `ClaudeStats` object. Cost is calculated using model-specific pricing in the `PRICING` map — verify rates against anthropic.com/pricing.
 2. `main.ts` sets up an `fs.watch` on `~/.claude/projects/` and calls `getClaudeStats()` on every `.jsonl` change (falls back to 30s polling if watch fails). Stats are pushed to the renderer via `stats-update` IPC push, and the tray title is updated with the current streak count.
-3. `toggl.ts` is a thin Toggl Track API v9 client. It fetches time entries and project metadata for the last 7 days. Called on demand (renderer calls `getTogglStats`) and polled every 60s from the renderer.
-4. The Toggl API token is stored encrypted on disk using `safeStorage` (macOS Keychain) at `app.getPath('userData')/toggl-token.enc`. IPC handlers `get-toggl-token` / `save-toggl-token` handle read/write.
-5. `main.ts` reads the Claude Code OAuth token from the macOS Keychain (`"Claude Code-credentials"`) and calls `https://api.anthropic.com/api/oauth/usage` to fetch real quota utilization and reset timestamps. The result is cached in `cachedUsageLimits` and polled every 5 minutes from the main process (seeded at startup). The renderer can also trigger a refresh via `get-usage-limits` IPC, which updates the same cache. The cached `resetsAt` timestamps are passed to `getClaudeStats()` as `WindowAnchors` so the parser uses Anthropic's exact server-side window boundaries instead of `now - N` approximations.
+3. `toggl.ts` is a thin Toggl Track API v9 client. It fetches time entries and project metadata for the last 7 days, and exposes write functions (`getOrCreateProject`, `getOrCreateTag`, `createTimeEntry`) used by the Claude→Toggl sync feature. Called on demand and polled every 3 minutes from the renderer (rate-limited to stay under Toggl's free-tier cap of 30 req/hr).
+4. The Toggl API token is stored encrypted on disk using `safeStorage` (macOS Keychain) at `app.getPath('userData')/toggl-token.enc`. IPC handlers `get-toggl-token` / `save-toggl-token` handle read/write. The token is entered once via the in-app UI and persists across restarts. The last successful Toggl API response is cached to `app.getPath('userData')/toggl-cache.json` so the UI stays populated during rate-limit windows (Toggl returns 402 when the hourly cap is exceeded).
+5. `main.ts` reads the Claude Code OAuth token from the macOS Keychain (`"Claude Code-credentials"`) and calls `https://api.anthropic.com/api/oauth/usage` to fetch real quota utilization (`utilization`) and reset timestamps (`resetsAt`). These drive the ring percentages and "resets in …" countdowns in the renderer. The result is held in `cachedUsageLimits` **and persisted to `usage-limits-cache.json`** in `userData`. On startup the cache is seeded synchronously from disk via `loadUsageCache()` (before the renderer can issue its first IPC call), then refreshed from the network; it is re-polled every 5 minutes. `refreshUsageLimits()` only overwrites the cache when a fetch returns real data — a token-less or all-null response is ignored, so the UI never regresses. This disk persistence matters because the OAuth endpoint frequently times out on a cold start (e.g. right after a code-change restart); without it the renderer would receive `null` and fall back to **parser-derived token ratios and `now-N` reset times**, which look plausible but are wrong (e.g. weekly showing 33%/19h instead of the API's 3%/6d).
 
 **Rolling window logic (`parser.ts`):**
 - `session5h` — 5-hour rolling window. When `WindowAnchors.fiveHourResetsAt` is provided, the window start is `resetsAt - 5h` (matching Anthropic's boundary exactly); otherwise falls back to `now - 5h`.
@@ -56,9 +56,16 @@ This is a macOS menu bar app built with Electron 30 + React 18 + TypeScript, bun
 | `get-stats` | renderer → main | `parser.ts` |
 | `stats-update` | main → renderer (push) | `main.ts` |
 | `get-usage-limits` | renderer → main | `main.ts` |
-| `get-toggl-stats` | renderer → main | `toggl.ts` |
+| `get-toggl-stats` | renderer → main | `toggl.ts` (falls back to disk cache on 402) |
 | `get-toggl-token` | renderer → main | `main.ts` |
 | `save-toggl-token` | renderer → main | `main.ts` |
+| `sync-claude-to-toggl` | renderer → main | `toggl.ts` + `parser.ts` |
+
+**Claude→Toggl sync (`sync-claude-to-toggl`):**
+- Segments Claude sessions into *work blocks* by idle gaps >25 min (`IDLE_GAP_MS` in `parser.ts`). Each block → one Toggl entry. This avoids inflating hours when a session spans a lunch break.
+- Target project: `"Side Project"`, tag: `"coding"`, description: Claude project folder name (`path.basename(cwd)`). Project and tag are created in Toggl if absent.
+- Dedup state (synced block keys → Toggl entry IDs) persists at `app.getPath('userData')/claude-toggl-sync.json`. Partial syncs survive errors.
+- Workspace/project/tag IDs are cached in the same file to avoid redundant API lookups.
 
 **File layout** (flat — no src/ or electron/ subdirectory):
 - `main.ts` — Electron main process
